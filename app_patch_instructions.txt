@@ -1,0 +1,33 @@
+# VERITY — app.py patch for FER CNN integration
+# ================================================
+# Make exactly 3 changes to app.py.
+
+# ── Change 1: Add import at the top ───────────────────────
+# Find this line (around line 15):
+from flask import Flask, render_template, request, jsonify, Response
+
+# Replace with:
+from flask import Flask, render_template, request, jsonify, Response
+from classifier import classify_emotion_frame
+
+
+# ── Change 2: Replace classify_emotion call in process_frame ──
+# Find this (around line 290 inside process_frame):
+emotions = classify_emotion(features)
+
+# Replace with:
+emotions = classify_emotion_frame(frame)
+
+
+# ── Change 3: Delete the entire classify_emotion() function ───
+# Find and delete everything from:
+def classify_emotion(f):
+# ...all the way down to the final return line of that function:
+    return {k: round(float(v / total), 3) for k, v in scores.items()}
+#
+# classifier.py now provides this — you don't need it in app.py anymore.
+
+
+# ── That's it. No other changes needed. ───────────────────────
+# The FER detector initialises lazily on the first frame,
+# so startup time is unchanged.

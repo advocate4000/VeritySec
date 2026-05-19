@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VERITY — Expression Training</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace;
+         display: flex; flex-direction: column; align-items: center;
+         min-height: 100vh; padding: 24px; }
+  h1   { color: #00ff88; letter-spacing: 4px; font-size: 1.2rem; margin-bottom: 4px; }
+  .sub { color: #555; font-size: 0.75rem; margin-bottom: 24px; }
+
+  .layout { display: grid; grid-template-columns: 360px 1fr; gap: 24px; width: 100%; max-width: 900px; }
+
+  video  { width: 360px; height: 270px; background: #111; border: 1px solid #222; border-radius: 4px; transform: scaleX(-1); }
+  canvas { display: none; }
+
+  .panel { background: #0d0d1a; border: 1px solid #1a1a2e; border-radius: 6px; padding: 20px; }
+  h2 { color: #00ff88; font-size: 0.85rem; letter-spacing: 2px; margin-bottom: 16px; }
+
+  .emotion-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; }
+  .emotion-card { background: #111; border: 1px solid #222; border-radius: 4px; padding: 10px;
+                  text-align: center; cursor: pointer; transition: all 0.2s; }
+  .emotion-card:hover { border-color: #00ff88; }
+  .emotion-card.active { border-color: #00ff88; background: #001a0d; }
+  .emotion-card .icon { font-size: 1.8rem; }
+  .emotion-card .name { font-size: 0.65rem; color: #888; margin-top: 4px; letter-spacing: 1px; }
+  .emotion-card .count { font-size: 0.75rem; color: #00ff88; margin-top: 2px; }
+
+  .prompt { background: #001a0d; border: 1px solid #00ff88; border-radius: 4px;
+            padding: 16px; margin-bottom: 16px; text-align: center; min-height: 60px;
+            display: flex; align-items: center; justify-content: center; }
+  .prompt .text { color: #00ff88; font-size: 0.9rem; letter-spacing: 1px; }
+
+  .progress-bar { height: 6px; background: #1a1a2e; border-radius: 3px; margin-bottom: 16px; overflow: hidden; }
+  .progress-fill { height: 100%; background: #00ff88; transition: width 0.1s; width: 0%; }
+
+  button { width: 100%; padding: 10px; border: 1px solid; border-radius: 4px;
+           font-family: inherit; font-size: 0.8rem; letter-spacing: 1px;
+           cursor: pointer; transition: all 0.2s; margin-bottom: 8px; }
+  .btn-collect { background: transparent; border-color: #00ff88; color: #00ff88; }
+  .btn-collect:hover:not(:disabled) { background: #00ff88; color: #000; }
+  .btn-train   { background: transparent; border-color: #0088ff; color: #0088ff; }
+  .btn-train:hover:not(:disabled) { background: #0088ff; color: #000; }
+  .btn-reset   { background: transparent; border-color: #444; color: #666; font-size: 0.7rem; }
+  .btn-reset:hover:not(:disabled) { border-color: #ff4444; color: #ff4444; }
+  button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .log { background: #050508; border: 1px solid #1a1a2e; border-radius: 4px;
+         padding: 10px; height: 120px; overflow-y: auto; font-size: 0.7rem; color: #556; }
+  .log .ok   { color: #00ff88; }
+  .log .warn { color: #ffaa00; }
+  .log .err  { color: #ff4444; }
+
+  .tip { font-size: 0.65rem; color: #445; margin-top: 12px; line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<h1>VERITY — EXPRESSION TRAINING</h1>
+<p class="sub">Train a personalised emotion model on your own face</p>
+
+<div class="layout">
+  <div>
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <div class="panel">
+    <h2>① SELECT EMOTION  &amp;  RECORD 30 FRAMES</h2>
+
+    <div class="emotion-grid">
+      <div class="emotion-card" data-emotion="happiness"  onclick="selectEmotion(this)">
+        <div class="icon">😄</div><div class="name">HAPPINESS</div>
+        <div class="count" id="cnt-happiness">0</div>
+      </div>
+      <div class="emotion-card" data-emotion="surprise" onclick="selectEmotion(this)">
+        <div class="icon">😮</div><div class="name">SURPRISE</div>
+        <div class="count" id="cnt-surprise">0</div>
+      </div>
+      <div class="emotion-card" data-emotion="fear" onclick="selectEmotion(this)">
+        <div class="icon">😨</div><div class="name">FEAR</div>
+        <div class="count" id="cnt-fear">0</div>
+      </div>
+      <div class="emotion-card" data-emotion="anger" onclick="selectEmotion(this)">
+        <div class="icon">😠</div><div class="name">ANGER</div>
+        <div class="count" id="cnt-anger">0</div>
+      </div>
+      <div class="emotion-card" data-emotion="disgust" onclick="selectEmotion(this)">
+        <div class="icon">🤢</div><div class="name">DISGUST</div>
+        <div class="count" id="cnt-disgust">0</div>
+      </div>
+      <div class="emotion-card" data-emotion="sadness" onclick="selectEmotion(this)">
+        <div class="icon">😢</div><div class="name">SADNESS</div>
+        <div class="count" id="cnt-sadness">0</div>
+      </div>
+    </div>
+
+    <div class="prompt"><span class="text" id="promptText">Select an emotion above to begin</span></div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+
+    <button class="btn-collect" id="btnCollect" onclick="startCollection()" disabled>
+      ▶ RECORD 30 FRAMES
+    </button>
+
+    <h2 style="margin-top:16px">② TRAIN MODEL  (need ≥10 per emotion)</h2>
+    <button class="btn-train"  id="btnTrain"  onclick="trainModel()" disabled>
+      ⚡ TRAIN NEURAL NETWORK
+    </button>
+    <button class="btn-reset"  id="btnReset"  onclick="resetData()">
+      ✕ CLEAR ALL DATA
+    </button>
+
+    <div class="log" id="log"></div>
+
+    <p class="tip">
+      <b>Instructions:</b> Select an emotion, make that expression clearly,
+      then click Record. Hold the expression steady for ~3 seconds while
+      recording. Repeat for all 6 emotions. Train when each has ≥10 samples
+      (shown in green). The model auto-loads in the main analysis view.
+    </p>
+  </div>
+</div>
+
+<script>
+const SESSION_ID = crypto.randomUUID();
+let selectedEmotion = null;
+let collecting = false;
+let counts = {};
+
+const PROMPTS = {
+  happiness: 'Smile broadly — show your teeth, raise your cheeks',
+  surprise:  'Open your eyes wide, raise your brows, drop your jaw',
+  fear:      'Raise inner brows, open eyes wide, part your lips',
+  anger:     'Draw brows together, tighten your jaw, press lips',
+  disgust:   'Wrinkle your nose, raise your upper lip',
+  sadness:   'Let brows droop inward, pull lip corners down',
+};
+
+function log(msg, type='') {
+  const el = document.getElementById('log');
+  const div = document.createElement('div');
+  div.className = type;
+  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+    document.getElementById('video').srcObject = stream;
+    log('Camera ready', 'ok');
+    const r = await fetch('/training_status').then(r => r.json()).catch(() => null);
+    if (r) updateCounts(r.counts || {});
+  } catch(e) { log('Camera error: ' + e.message, 'err'); }
+}
+
+function selectEmotion(card) {
+  document.querySelectorAll('.emotion-card').forEach(c => c.classList.remove('active'));
+  card.classList.add('active');
+  selectedEmotion = card.dataset.emotion;
+  document.getElementById('promptText').textContent = PROMPTS[selectedEmotion];
+  document.getElementById('btnCollect').disabled = false;
+}
+
+async function startCollection() {
+  if (!selectedEmotion || collecting) return;
+  collecting = true;
+  document.getElementById('btnCollect').disabled = true;
+  document.getElementById('btnCollect').textContent = '⏺ RECORDING…';
+
+  const video  = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  canvas.width  = video.videoWidth  || 640;
+  canvas.height = video.videoHeight || 480;
+  const ctx = canvas.getContext('2d');
+
+  const TARGET = 30;
+  let collected = 0;
+  const fill = document.getElementById('progressFill');
+
+  // First get baseline by calling /analyse briefly
+  for (let i = 0; i < TARGET; i++) {
+    ctx.save(); ctx.scale(-1,1); ctx.drawImage(video, -canvas.width, 0); ctx.restore();
+    const imageData = canvas.toDataURL('image/jpeg', 0.8);
+
+    try {
+      const res = await fetch('/analyse', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({image: imageData, session_id: SESSION_ID}),
+      });
+      const data = await res.json();
+
+      if (data.status === 'ok' && data.features) {
+        const r2 = await fetch('/collect_sample', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({features: data.features, label: selectedEmotion}),
+        });
+        const d2 = await r2.json();
+        if (d2.status === 'ok') {
+          collected++;
+          fill.style.width = (collected / TARGET * 100) + '%';
+          updateCounts(d2.counts);
+        }
+      } else if (data.calibrating) {
+        log('Still calibrating — wait for green border on main page first', 'warn');
+        break;
+      }
+    } catch(e) { log('Fetch error: ' + e.message, 'err'); }
+
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  log(`Recorded ${collected} ${selectedEmotion} samples`, collected > 0 ? 'ok' : 'err');
+  fill.style.width = '0%';
+  document.getElementById('btnCollect').disabled = false;
+  document.getElementById('btnCollect').textContent = '▶ RECORD 30 FRAMES';
+  collecting = false;
+  checkTrainReady();
+}
+
+function updateCounts(c) {
+  counts = c;
+  let total = 0;
+  for (const [em, n] of Object.entries(c)) {
+    const el = document.getElementById('cnt-' + em);
+    if (el) { el.textContent = n; el.style.color = n >= 10 ? '#00ff88' : '#666'; }
+    total += n;
+  }
+}
+
+function checkTrainReady() {
+  const ready = Object.values(counts).every(n => n >= 5)
+              && Object.values(counts).reduce((a,b) => a+b, 0) >= 30;
+  document.getElementById('btnTrain').disabled = !ready;
+}
+
+async function trainModel() {
+  document.getElementById('btnTrain').disabled = true;
+  document.getElementById('btnTrain').textContent = '⏳ TRAINING…';
+  log('Training neural network…');
+  try {
+    const r = await fetch('/train_model', {method:'POST',
+                          headers:{'Content-Type':'application/json'},
+                          body:'{}'});
+    const d = await r.json();
+    if (d.status === 'ok') {
+      log(`Training complete — accuracy ${(d.accuracy*100).toFixed(1)}% on ${d.n_samples} samples`, 'ok');
+      log('Model saved. Reload the main analysis page to use it.', 'ok');
+    } else {
+      log('Training failed: ' + (d.error || JSON.stringify(d)), 'err');
+    }
+  } catch(e) { log('Error: ' + e.message, 'err'); }
+  document.getElementById('btnTrain').textContent = '⚡ TRAIN NEURAL NETWORK';
+  checkTrainReady();
+}
+
+async function resetData() {
+  if (!confirm('Clear all collected training data?')) return;
+  await fetch('/reset_training', {method:'POST',
+              headers:{'Content-Type':'application/json'}, body:'{}'});
+  counts = {};
+  document.querySelectorAll('.count').forEach(el => { el.textContent='0'; el.style.color='#666'; });
+  document.getElementById('btnTrain').disabled = true;
+  log('Training data cleared', 'warn');
+}
+
+startCamera();
+</script>
+</body>
+</html>
