@@ -885,7 +885,15 @@ def process_frame(img_bytes: str, state: dict) -> dict:
     x2 = int(min(w, max(xs) + pad_x))
     y2 = int(min(h, max(ys) + pad_y))
     face_crop = frame[y1:y2, x1:x2] if (y2 > y1 and x2 > x1) else frame
-    emotions = classify_emotion_frame(face_crop)
+    # Run HSEmotions CNN every 5th frame — ~6 fps on CPU which is
+    # plenty for smooth emotion tracking. Reuse cached result in between.
+    # This cuts CPU load by ~80% and eliminates the UI lag.
+    CNN_EVERY = 5
+    if fc % CNN_EVERY == 0 or "last_emotions" not in state:
+        emotions = classify_emotion_frame(face_crop)
+        state["last_emotions"] = emotions
+    else:
+        emotions = state["last_emotions"]
 
     # Deception analysis uses RAW features + baseline for explicit comparison.
     deception = analyse_deception(
