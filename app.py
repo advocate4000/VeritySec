@@ -582,20 +582,18 @@ def process_frame(img_bytes):
         if frame_count == 35:
             baseline_features = compute_baseline(list(expression_history)[:30])
 
-    # Adjust features relative to baseline
-    # FIX: adj_features are now also used for emotion classification (not just
-    #      deception), so the emotion bars reflect changes from YOUR neutral face
-    #      rather than raw absolute values. This makes fear/surprise/disgust
-    #      register correctly instead of being swamped by inter-person variation.
+    # Adjust features relative to baseline (used by deception analysis only).
+    # Emotion classification always uses raw features — the classifier thresholds
+    # and the brow_draw formula (0.36 - brow_gap) are calibrated for absolute
+    # values (~0.35). Passing delta values (≈0 at neutral) makes
+    # brow_draw = 0.36 - 0 = 1.08 → anger pegged at 100% permanently.
     adj_features = features.copy()
     if baseline_features:
         for k in adj_features:
             if k in baseline_features:
                 adj_features[k] = features[k] - baseline_features[k]
 
-    # Classify emotion on baseline-adjusted features once calibration is done
-    emotion_features = adj_features if baseline_features else features
-    raw_emotions     = classify_emotion(emotion_features)
+    raw_emotions = classify_emotion(features)
 
     # EMA smoothing: reduces frame-to-frame jitter without adding perceptible lag.
     # α=0.35 → ~2-frame time constant at 30fps — fast enough to track expressions,
