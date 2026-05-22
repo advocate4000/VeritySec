@@ -59,7 +59,17 @@ def _make_landmarker(detection_conf=0.5, tracking_conf=0.5):
     )
     return _mp_vision.FaceLandmarker.create_from_options(opts)
 
-face_landmarker = _make_landmarker()
+# Lazy init — do NOT create the landmarker at import time.
+# Gunicorn --preload forks after import; TFLite (used by MediaPipe) is not
+# fork-safe, so a module-level instance causes "post_fork hook error" crashes.
+# Each worker creates its own instance on its first request instead.
+_face_landmarker = None
+
+def get_landmarker():
+    global _face_landmarker
+    if _face_landmarker is None:
+        _face_landmarker = _make_landmarker()
+    return _face_landmarker
 
 # ──────────────────────────────────────────────────────────
 # Ekman-derived landmark regions (MediaPipe 468-point mesh)
@@ -554,7 +564,7 @@ def process_frame(img_bytes):
 
     # Run MediaPipe (Tasks API: wrap ndarray in mp.Image, unpack face_landmarks)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-    detection = face_landmarker.detect(mp_image)
+    detection = get_landmarker().detect(mp_image)
     if not detection.face_landmarks:
         return {"error": "no_face", "message": "No face detected"}
 
