@@ -393,20 +393,37 @@ def get_session_state(sid: str) -> dict:
     with _session_lock:
         if sid not in _session_store:
             _session_store[sid] = {
-                "history":     deque(maxlen=HISTORY_LEN),
-                "timestamps":  deque(maxlen=HISTORY_LEN),
-                "baseline":    {},
-                "frame_count": 0,
-                "start_time":  time.time(),
-                "smoother":    ExponentialSmoother(alpha=0.15),
-                "last_access": time.time(),
+                "history":       deque(maxlen=HISTORY_LEN),
+                "timestamps":    deque(maxlen=HISTORY_LEN),
+                "baseline":      {},
+                "frame_count":   0,
+                "start_time":    time.time(),
+                "smoother":      ExponentialSmoother(alpha=0.15),
+                "last_access":   time.time(),
+                # CNN async fields — CNN never blocks the request thread
+                "last_emotions": {e: round(1/6, 3) for e in EMOTION_LABELS},
+                "cnn_running":   False,
             }
         state = _session_store[sid]
         state["last_access"] = time.time()
-        # Lightweight GC: run every 100 state fetches
         if len(_session_store) % 100 == 0:
             _purge_stale_sessions()
         return state
+
+
+def _run_cnn_async(state: dict, face_crop) -> None:
+    """
+    Run classify_emotion_frame in a daemon thread so it never stalls
+    the /analyse response.  Result is written back to session state;
+    the next frame picks it up automatically.
+    """
+    try:
+        result = classify_emotion_frame(face_crop)
+        state["last_emotions"] = result
+    except Exception as exc:
+        print(f"[VERITY] CNN inference error: {exc}", flush=True)
+    finally:
+        state["cnn_running"] = False
 
 
 # ══════════════════════════════════════════════════════════════
@@ -561,7 +578,12 @@ def detect_micro_expressions(history: list) -> list[tuple[str, int]]:
     """
     Scan the feature history for brief transient peaks indicative of
     suppressed micro-expressions.  Returns [(emotion, frame_index), …].
+
+    Only the last 30 frames (~1 s at 30 fps) are scanned — scanning the
+    full 90-frame deque with scipy every frame was a significant CPU cost.
     """
+    # Clamp to most recent 30 frames — micro-expressions are brief by definition
+    history = history[-30:]
     if len(history) < 15:
         return []
 
@@ -601,6 +623,7 @@ def analyse_deception(
     history_features: list,
     history_times: list,
     smoother: ExponentialSmoother,
+    micro_exprs: list | None = None,
 ) -> dict:
     """
     Ekman deception analysis using raw features + calibrated baseline.
@@ -741,7 +764,10 @@ def analyse_deception(
                 })
 
     # ── 3. MICRO-EXPRESSIONS ──────────────────────────────────
-    micro_exprs = detect_micro_expressions(history_features)
+    # Results passed in from process_frame (computed every 5 frames)
+    # rather than re-running scipy here on every call.
+    if micro_exprs is None:
+        micro_exprs = detect_micro_expressions(history_features)
     for emotion_type, frame_idx in micro_exprs[-3:]:
         components.append(0.80)
         clues.append({
@@ -835,7 +861,7 @@ def _calibration_state(fc: int, history: list, baseline: dict) -> dict:
 
 def process_frame(img_bytes: str, state: dict) -> dict:
     """Decode one frame, run the full Ekman pipeline, return JSON-ready dict."""
-    landmarker = get_face_landmarker()   # [1] thread-local tasks-API instance
+    landmarker = get_face_landmarker()
 
     arr   = np.frombuffer(base64.b64decode(img_bytes), np.uint8)
     frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
@@ -850,7 +876,7 @@ def process_frame(img_bytes: str, state: dict) -> dict:
     if not result.face_landmarks:
         return {"error": "no_face", "message": "No face detected"}
 
-    lms = result.face_landmarks[0]   # list[NormalizedLandmark] — same .x/.y interface
+    lms      = result.face_landmarks[0]
     features = extract_features(lms, w, h)
 
     now = time.time()
@@ -859,50 +885,64 @@ def process_frame(img_bytes: str, state: dict) -> dict:
     state["frame_count"] += 1
     fc = state["frame_count"]
 
-    # Calibrate baseline from frames 5–35
     if fc == 35:
         state["baseline"] = compute_baseline(list(state["history"])[:30])
 
     baseline = state["baseline"]
 
-    # Emotion classification uses DELTA features (current - baseline).
-    # Deltas are ~0 for neutral and only rise for genuine expressions,
-    # eliminating the background bias from large raw constants.
+    # Delta features — computed once, reused by both emotion classifier and
+    # deception analyser so we don't iterate the dict twice.
     if baseline:
         adj = {k: features[k] - baseline.get(k, features[k]) for k in features}
     else:
-        adj = {k: 0.0 for k in features}  # pre-calibration: neutral
+        adj = {k: 0.0 for k in features}
 
-    # Extract tight face crop from MediaPipe landmark bounding box.
-    # HSEmotions accuracy is significantly better on a cropped face
-    # than on the full webcam frame.
-    xs = [p.x * w for p in lms]
-    ys = [p.y * h for p in lms]
-    pad_x = int(0.15 * (max(xs) - min(xs)))   # 15% padding each side
-    pad_y = int(0.15 * (max(ys) - min(ys)))
-    x1 = int(max(0, min(xs) - pad_x))
-    y1 = int(max(0, min(ys) - pad_y))
-    x2 = int(min(w, max(xs) + pad_x))
-    y2 = int(min(h, max(ys) + pad_y))
-    face_crop = frame[y1:y2, x1:x2] if (y2 > y1 and x2 > x1) else frame
-    # Run HSEmotions CNN every 5th frame — ~6 fps on CPU which is
-    # plenty for smooth emotion tracking. Reuse cached result in between.
-    # This cuts CPU load by ~80% and eliminates the UI lag.
-    CNN_EVERY = 5
-    if fc % CNN_EVERY == 0 or "last_emotions" not in state:
-        emotions = classify_emotion_frame(face_crop)
-        state["last_emotions"] = emotions
-    else:
-        emotions = state["last_emotions"]
+    # ── FIX 1: CNN runs in a background thread — never blocks this response ──
+    # Fire a new CNN inference only when the previous one has finished.
+    # The most recent cached result is used immediately for this frame.
+    CNN_EVERY = 3   # tightened from 5 — CNN is now off-thread so cost is ~0
+    if fc % CNN_EVERY == 0 and not state["cnn_running"]:
+        # Build face crop — single pass over landmarks (FIX 4)
+        xs = [p.x * w for p in lms]
+        ys = [p.y * h for p in lms]
+        xmin, xmax = min(xs), max(xs)
+        ymin, ymax = min(ys), max(ys)
+        pad_x = int(0.15 * (xmax - xmin))
+        pad_y = int(0.15 * (ymax - ymin))
+        x1 = int(max(0, xmin - pad_x))
+        y1 = int(max(0, ymin - pad_y))
+        x2 = int(min(w, xmax + pad_x))
+        y2 = int(min(h, ymax + pad_y))
+        face_crop = frame[y1:y2, x1:x2] if (y2 > y1 and x2 > x1) else frame
 
-    # Deception analysis uses RAW features + baseline for explicit comparison.
+        state["cnn_running"] = True
+        t = threading.Thread(
+            target=_run_cnn_async,
+            args=(state, face_crop),
+            daemon=True,
+        )
+        t.start()
+
+    # Use whatever CNN result is cached — updated async in the background
+    emotions = state["last_emotions"]
+
+    # ── FIX 3: Convert deque to list once — reused by micro + deception ──
+    history_list = list(state["history"])
+
+    # ── FIX 2: Micro-expressions only every 5 frames (scipy is non-trivial) ──
+    # detect_micro_expressions already clamps to last 30 frames internally.
+    if fc % 5 == 0:
+        state["last_micro"] = detect_micro_expressions(history_list)
+    micro_exprs = state.get("last_micro", [])
+
     deception = analyse_deception(
         features,
         baseline or {},
         emotions,
-        list(state["history"]),
+        history_list,
         list(state["timestamps"]),
         state["smoother"],
+        micro_exprs,
     )
 
     def pts(indices):
@@ -921,15 +961,15 @@ def process_frame(img_bytes: str, state: dict) -> dict:
 
     cal = _calibration_state(fc, state["history"], state["baseline"])
     return {
-        "status":       "ok",
-        "frame":        fc,
-        "elapsed":      round(now - state["start_time"], 1),
-        "features":     features,
-        "emotions":     emotions,
-        "deception":    deception,
-        "regions":      regions,
-        "calibration":  cal,                       # {phase, progress, quality}
-        "calibrating":  fc < 35,                   # kept for backwards compat
+        "status":         "ok",
+        "frame":          fc,
+        "elapsed":        round(now - state["start_time"], 1),
+        "features":       features,
+        "emotions":       emotions,
+        "deception":      deception,
+        "regions":        regions,
+        "calibration":    cal,
+        "calibrating":    fc < 35,
         "baseline_ready": bool(state["baseline"]),
     }
 
