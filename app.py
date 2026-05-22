@@ -13,21 +13,53 @@ import time
 import math
 import os
 import tempfile
+import urllib.request
 from collections import deque
 from flask import Flask, render_template, request, jsonify, Response
 
 app = Flask(__name__)
 
 # ──────────────────────────────────────────────────────────
-# MediaPipe setup
+# MediaPipe setup — Tasks API (mp.solutions removed in ≥0.10.8)
 # ──────────────────────────────────────────────────────────
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
+from mediapipe.tasks import python as _mp_python
+from mediapipe.tasks.python import vision as _mp_vision
+
+_MODEL_URL  = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 )
+_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_landmarker.task")
+
+def _ensure_model():
+    """Download FaceLandmarker model on first run (~5 MB)."""
+    if not os.path.exists(_MODEL_PATH):
+        print("[VERITY] Downloading FaceLandmarker model (~5 MB) …", flush=True)
+        try:
+            urllib.request.urlretrieve(_MODEL_URL, _MODEL_PATH)
+            print("[VERITY] Model saved to", _MODEL_PATH, flush=True)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not download FaceLandmarker model: {exc}\n"
+                f"Download manually from:\n  {_MODEL_URL}\n"
+                f"and place it at: {_MODEL_PATH}"
+            ) from exc
+
+_ensure_model()
+
+def _make_landmarker(detection_conf=0.5, tracking_conf=0.5):
+    """Create a FaceLandmarker in IMAGE mode (stateless, safe for per-frame use)."""
+    opts = _mp_vision.FaceLandmarkerOptions(
+        base_options=_mp_python.BaseOptions(model_asset_path=_MODEL_PATH),
+        running_mode=_mp_vision.RunningMode.IMAGE,
+        num_faces=1,
+        min_face_detection_confidence=detection_conf,
+        min_face_presence_confidence=tracking_conf,
+        min_tracking_confidence=tracking_conf,
+    )
+    return _mp_vision.FaceLandmarker.create_from_options(opts)
+
+face_landmarker = _make_landmarker()
 
 # ──────────────────────────────────────────────────────────
 # Ekman-derived landmark regions (MediaPipe 468-point mesh)
@@ -520,12 +552,13 @@ def process_frame(img_bytes):
     h, w = frame.shape[:2]
     rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    # Run MediaPipe
-    results = face_mesh.process(rgb)
-    if not results.multi_face_landmarks:
+    # Run MediaPipe (Tasks API: wrap ndarray in mp.Image, unpack face_landmarks)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    detection = face_landmarker.detect(mp_image)
+    if not detection.face_landmarks:
         return {"error": "no_face", "message": "No face detected"}
 
-    lms      = results.multi_face_landmarks[0].landmark
+    lms      = detection.face_landmarks[0]   # list of NormalizedLandmark (same .x/.y/.z)
     features = extract_features(lms, w, h)
 
     # Store history
@@ -680,13 +713,9 @@ def process_video_file(path):
     Analyses every 3rd frame to balance speed vs resolution.
     Returns full timeline + aggregated report.
     """
-    # Dedicated face mesh instance for video (stateless per-file)
-    video_face_mesh = mp_face_mesh.FaceMesh(
-        max_num_faces=1,
-        refine_landmarks=True,
-        min_detection_confidence=0.45,
-        min_tracking_confidence=0.45,
-    )
+    # Dedicated landmarker instance for video — IMAGE mode is stateless,
+    # safe to use per-frame without timestamp bookkeeping.
+    video_landmarker = _make_landmarker(detection_conf=0.45, tracking_conf=0.45)
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -719,9 +748,10 @@ def process_video_file(path):
 
         h, w = frame.shape[:2]
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = video_face_mesh.process(rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        detection = video_landmarker.detect(mp_image)
 
-        if not results.multi_face_landmarks:
+        if not detection.face_landmarks:
             timeline.append({
                 "t": round(timestamp, 2),
                 "frame": v_frame_count,
@@ -729,7 +759,7 @@ def process_video_file(path):
             })
             continue
 
-        lms      = results.multi_face_landmarks[0].landmark
+        lms      = detection.face_landmarks[0]
         features = extract_features(lms, w, h)
         emotions = classify_emotion(features)
 
@@ -773,7 +803,7 @@ def process_video_file(path):
         })
 
     cap.release()
-    video_face_mesh.close()
+    video_landmarker.close()
 
     if not timeline:
         return {"error": "No frames processed"}
