@@ -257,26 +257,39 @@ def extract_features(landmarks, w, h):
 # Emotion classifier (rule-based, Ekman action units)
 # ──────────────────────────────────────────────────────────
 
-def classify_emotion(f):
+def classify_emotion(f, is_delta=False):
     """
     Classify primary emotion from features using Ekman's muscle-movement rules.
     Returns dict of {emotion: confidence 0-1}
 
-    KEY FIX: every contributing feature now has a noise floor (gate).
-    Without floors, always-positive features (lower_lid_tension, lip_press,
-    brow_gap) permanently inflate happiness/anger/sadness, leaving almost
-    zero budget for surprise/fear/disgust after sum-normalisation.
+    is_delta=False  — f contains raw landmark measurements (pre-calibration).
+                      Floors are calibrated for absolute values; brow_gap ~0.35.
+    is_delta=True   — f contains (raw - baseline) delta values (post-calibration).
+                      Floors become small noise thresholds; brow_gap ~0 at neutral.
+                      brow_draw uses negative-delta convention (closer = negative).
+
+    Without this split, passing delta values to the raw formula gives
+    brow_draw = max(0.36 - 0, 0) * 3 = 1.08 → anger locked at 100%.
     """
-    def gate(val, floor):
-        """Zero out values below noise floor — only genuine activations score."""
-        return max(val - floor, 0.0)
+    if is_delta:
+        # Delta space: positive = more than baseline, negative = less than baseline.
+        # Use a tiny universal noise floor to reject measurement jitter (~0.003).
+        def gate(val, _raw_floor):
+            return max(val - 0.003, 0.0)
+        # brow_gap delta < 0  →  brows closer than neutral  →  anger
+        # delta range for genuine furrow ≈ -0.03 to -0.06; multiplier 8 gives 0.24-0.48
+        brow_draw = max(-f["brow_gap"] - 0.003, 0) * 8.0
+    else:
+        # Raw space: use absolute noise floors tuned to typical resting values.
+        def gate(val, raw_floor):
+            return max(val - raw_floor, 0.0)
+        # brow_gap raw ~0.35; threshold 0.36 means only genuinely furrowed brows score
+        brow_draw = max(0.36 - f["brow_gap"], 0) * 3.0
 
     scores = {}
 
     # HAPPINESS — lip corners up + cheek raise + lower lid crinkle
     # Ekman: Duchenne smile requires lower lid tension + cheek raise (p.105-120)
-    # FIX: lower_lid_tension is always > 0 (it's a spread measure); gate at 0.13
-    #      so resting eyelids don't contribute. cheek_raise also gated.
     scores["happiness"] = np.clip(
         0.40 * gate(f["lip_corner_dir"],    0.015) +
         0.35 * gate(f["cheek_raise"],       0.010) +
@@ -285,7 +298,6 @@ def classify_emotion(f):
 
     # SURPRISE — outer brow raise + eye wide + jaw drop
     # Ekman: surprise always brief; prolonged = likely fake (p.148)
-    # FIX: eye_aperture was raw (always ~0.18); gate so relaxed eyes don't score
     scores["surprise"] = np.clip(
         0.40 * gate(f["outer_brow_raise"], 0.010) +
         0.25 * gate(f["eye_aperture"],     0.165) +
@@ -294,7 +306,6 @@ def classify_emotion(f):
 
     # FEAR — inner brow raise + eye wide + mouth open
     # Ekman: fear brow hardest to voluntarily produce; reliable leakage site (p.148)
-    # FIX: eye_aperture and mouth_open had no floor — resting face always scored
     scores["fear"] = np.clip(
         0.50 * gate(f["inner_brow_raise"], 0.008) +
         0.20 * gate(f["eye_aperture"],     0.165) +
@@ -304,11 +315,6 @@ def classify_emotion(f):
 
     # ANGER — brow drawn together + lower lid tension + lip press
     # Ekman: brow draw-together is emblem (easy to fake); eyelid tension often missing (p.149)
-    # FIX 1: brow_gap threshold 0.4 was so generous it always gave brow_draw > 0.
-    #         Tightened to 0.36. FIX 2: lip_press is near 1.0 whenever mouth is
-    #         barely open (which is always), so floor at 0.60 means only
-    #         deliberately pressed lips count. FIX 3: lower_lid floor raised to 0.15.
-    brow_draw = max(0.36 - f["brow_gap"], 0) * 3.0
     scores["anger"] = np.clip(
         0.40 * brow_draw +
         0.35 * gate(f["lower_lid_tension"], 0.150) +
@@ -318,7 +324,6 @@ def classify_emotion(f):
 
     # DISGUST — upper lip raise + nose wrinkle + lip corners down
     # Ekman: nose wrinkle, upper lip raise easy to fake (p.149)
-    # FIX: `* 5` multiplier on a gated value caused instability; gentler scaling
     scores["disgust"] = np.clip(
         0.45 * gate(f["upper_lip_raise"], 0.035) * 4.0 +
         0.35 * gate(f["nose_wrinkle"],    0.060) +
@@ -327,7 +332,6 @@ def classify_emotion(f):
 
     # SADNESS — inner brow raise + lip corners down + cheeks not raised
     # Ekman: sad brow hard to fake; inner brow corner up in genuine sadness (p.150)
-    # FIX: -cheek_raise was contributing for any neutral face; gated
     scores["sadness"] = np.clip(
         0.45 * gate(f["inner_brow_raise"],  0.008) +
         0.35 * gate(-f["lip_corner_dir"],   0.010) +
@@ -335,8 +339,7 @@ def classify_emotion(f):
         0, 1)
 
     # Normalise so scores sum to 1.
-    # When all raw scores are near-zero (neutral face) the result will be a flat
-    # ~0.167 each — that's correct; neutral means no dominant emotion.
+    # Neutral face in delta mode → all raw scores ≈ 0 → flat ~0.167 each (correct).
     total = sum(scores.values()) + 1e-6
     return {k: round(float(v / total), 3) for k, v in scores.items()}
 
@@ -582,18 +585,19 @@ def process_frame(img_bytes):
         if frame_count == 35:
             baseline_features = compute_baseline(list(expression_history)[:30])
 
-    # Adjust features relative to baseline (used by deception analysis only).
-    # Emotion classification always uses raw features — the classifier thresholds
-    # and the brow_draw formula (0.36 - brow_gap) are calibrated for absolute
-    # values (~0.35). Passing delta values (≈0 at neutral) makes
-    # brow_draw = 0.36 - 0 = 1.08 → anger pegged at 100% permanently.
+    # Adjust features relative to baseline.
+    # Emotion classification uses delta features once calibration is done —
+    # classify_emotion(is_delta=True) adapts its formulas accordingly.
+    # Deception analysis also uses delta features (checks for deviations from neutral).
     adj_features = features.copy()
     if baseline_features:
         for k in adj_features:
             if k in baseline_features:
                 adj_features[k] = features[k] - baseline_features[k]
 
-    raw_emotions = classify_emotion(features)
+    calibrated   = bool(baseline_features)
+    raw_emotions = classify_emotion(adj_features if calibrated else features,
+                                    is_delta=calibrated)
 
     # EMA smoothing: reduces frame-to-frame jitter without adding perceptible lag.
     # α=0.35 → ~2-frame time constant at 30fps — fast enough to track expressions,
