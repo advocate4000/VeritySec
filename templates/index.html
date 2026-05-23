@@ -1,0 +1,1318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VERITY — Deception Analysis System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Bebas+Neue&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --black:    #080a0e;
+  --dark:     #0d1117;
+  --panel:    #111620;
+  --border:   #1e2a3a;
+  --dim:      #1c2535;
+  --text:     #8faabb;
+  --text-hi:  #c8dde8;
+  --amber:    #e8a135;
+  --amber-lo: #7a4a10;
+  --red:      #e84040;
+  --red-lo:   #5a1010;
+  --green:    #35c988;
+  --green-lo: #0f4429;
+  --cyan:     #35b4e8;
+  --cyan-lo:  #0d3a52;
+  --white:    #f0f5fa;
+  --font-mono: 'Share Tech Mono', monospace;
+  --font-display: 'Bebas Neue', sans-serif;
+  --font-ui: 'Space Mono', monospace;
+  /* Global base font size — increase this to scale all rem units */
+  font-size: 16px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--black);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.07) 2px, rgba(0,0,0,0.07) 4px);
+  pointer-events: none; z-index: 9999;
+}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--dim); }
+::-webkit-scrollbar-thumb { background: var(--border); }
+
+/* ── Header ── */
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 28px;
+  border-bottom: 1px solid var(--border);
+  background: var(--dark);
+  position: sticky; top: 0; z-index: 100;
+}
+.logo-block { display: flex; align-items: baseline; gap: 14px; }
+.logo {
+  font-family: var(--font-display); font-size: 2.6rem;
+  letter-spacing: 0.18em; color: var(--white); line-height: 1;
+}
+.logo-sub {
+  font-size: 0.78rem; color: var(--text); letter-spacing: 0.18em;
+  border-left: 1px solid var(--border); padding-left: 14px; line-height: 1.6;
+}
+.header-right { display: flex; align-items: center; gap: 24px; }
+.status-pill {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 12px; border: 1px solid var(--border);
+  font-size: 0.8rem; letter-spacing: 0.14em;
+}
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text); animation: pulse 2s infinite; }
+.status-dot.active  { background: var(--green); }
+.status-dot.warning { background: var(--amber); animation: pulse-fast 0.8s infinite; }
+.status-dot.alert   { background: var(--red);   animation: pulse-fast 0.5s infinite; }
+@keyframes pulse      { 0%,100%{opacity:1} 50%{opacity:0.4} }
+@keyframes pulse-fast { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+/* ── Mode tabs ── */
+.mode-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--dark);
+}
+.mode-tab {
+  padding: 13px 32px; font-size: 0.78rem; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--text); cursor: pointer;
+  border-bottom: 2px solid transparent; transition: all 0.2s;
+  display: flex; align-items: center; gap: 9px;
+}
+.mode-tab:hover { color: var(--text-hi); }
+.mode-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+.tab-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* ── Main layout ── */
+.main {
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  gap: 1px;
+  height: calc(100vh - 122px);
+  background: var(--border);
+}
+.panel-view { display: none; }
+.panel-view.active { display: contents; }
+
+/* ── Section label ── */
+.section-label {
+  font-size: 0.75rem; letter-spacing: 0.22em; color: var(--text);
+  text-transform: uppercase; display: flex; align-items: center; gap: 9px;
+}
+.section-label::before { content:''; display:inline-block; width:14px; height:1px; background:var(--amber); }
+
+/* ══════════════════════════════════════
+   LIVE TAB — Camera section
+   ══════════════════════════════════════ */
+.camera-section {
+  background: var(--dark); display: flex; flex-direction: column;
+  padding: 20px; gap: 16px; overflow: hidden;
+}
+.camera-header { display: flex; justify-content: space-between; align-items: center; }
+
+.camera-feed-wrap {
+  position: relative; flex: 1;
+  background: #050709; border: 1px solid var(--border);
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
+}
+#videoEl { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); opacity:0.92; }
+#canvasEl { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+
+.feed-overlay { position:absolute; inset:0; pointer-events:none; }
+.corner { position:absolute; width:20px; height:20px; }
+.corner.tl { top:12px; left:12px; border-top:2px solid var(--amber); border-left:2px solid var(--amber); }
+.corner.tr { top:12px; right:12px; border-top:2px solid var(--amber); border-right:2px solid var(--amber); }
+.corner.bl { bottom:12px; left:12px; border-bottom:2px solid var(--amber); border-left:2px solid var(--amber); }
+.corner.br { bottom:12px; right:12px; border-bottom:2px solid var(--amber); border-right:2px solid var(--amber); }
+.feed-label {
+  position:absolute; top:12px; left:50%; transform:translateX(-50%);
+  font-size:0.72rem; letter-spacing:0.25em; color:var(--amber);
+  padding:3px 10px; border:1px solid var(--amber-lo); background:rgba(0,0,0,0.75);
+}
+.rec-indicator {
+  position:absolute; top:14px; right:32px; display:flex; align-items:center;
+  gap:6px; font-size:0.72rem; color:var(--red); letter-spacing:0.15em;
+}
+.rec-dot { width:7px; height:7px; border-radius:50%; background:var(--red); animation:pulse-fast 1s infinite; }
+
+#noFaceOverlay {
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; background:rgba(8,10,14,0.85);
+  font-size:0.85rem; letter-spacing:0.2em; color:var(--text); gap:12px; transition:opacity 0.3s;
+}
+#noFaceOverlay.hidden { opacity:0; pointer-events:none; }
+.no-face-icon { font-size:2.4rem; opacity:0.3; }
+
+/* Calibration bar */
+.calibration-bar {
+  margin:0; padding:9px 14px; background:rgba(232,161,53,0.08);
+  border:1px solid var(--amber-lo); font-size:0.72rem; letter-spacing:0.14em;
+  color:var(--amber); display:flex; align-items:center; gap:10px; transition:opacity 0.5s;
+}
+.calibration-bar.hidden { opacity:0; pointer-events:none; height:0; padding:0; border:none; overflow:hidden; }
+.cal-progress { flex:1; height:3px; background:var(--amber-lo); }
+.cal-fill { height:100%; background:var(--amber); width:0%; transition:width 0.2s; }
+
+/* Calibration quality banner — shown once after collection finishes */
+.quality-banner {
+  display:none; padding:7px 14px; font-size:0.72rem; letter-spacing:0.14em;
+  border:1px solid; align-items:center; gap:10px; animation:fadeIn 0.5s ease;
+}
+.quality-banner.good  { background:rgba(53,201,136,0.07); border-color:var(--green-lo); color:var(--green); }
+.quality-banner.warn  { background:rgba(232,161,53,0.07); border-color:var(--amber-lo); color:var(--amber); }
+.quality-banner.show  { display:flex; }
+@keyframes fadeIn { from{opacity:0} to{opacity:1} }
+
+/* Emotion strip */
+.emotion-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; }
+.emo-cell { display:flex; flex-direction:column; gap:5px; }
+.emo-label { font-size:0.68rem; letter-spacing:0.15em; color:var(--text); text-transform:uppercase; text-align:center; }
+.emo-bar-bg { height:5px; background:var(--dim); overflow:hidden; }
+.emo-bar-fill { height:100%; width:0%; transition:width 0.15s; }
+.emo-value { font-size:0.78rem; text-align:center; color:var(--text-hi); font-family:var(--font-ui); }
+
+/* ══════════════════════════════════════
+   LIVE TAB — Right panel
+   ══════════════════════════════════════ */
+.right-panel { background:var(--panel); display:flex; flex-direction:column; overflow:hidden; }
+
+.deception-section { padding:20px; border-bottom:1px solid var(--border); }
+.meter-title {
+  font-size:0.75rem; letter-spacing:0.22em; color:var(--text);
+  text-transform:uppercase; margin-bottom:16px; display:flex; align-items:center; gap:9px;
+}
+.meter-title::before { content:''; width:14px; height:1px; background:var(--red); }
+.deception-score-display { display:flex; align-items:baseline; gap:8px; margin-bottom:16px; }
+.score-big { font-family:var(--font-display); font-size:5rem; line-height:1; color:var(--white); transition:color 0.3s; }
+.score-pct { font-size:1.4rem; color:var(--text); font-family:var(--font-ui); }
+.score-label {
+  font-size:0.72rem; letter-spacing:0.2em; text-transform:uppercase;
+  margin-left:auto; padding:4px 10px; border:1px solid var(--border);
+  align-self:center; color:var(--text); transition:all 0.3s;
+}
+.gauge-track { height:9px; background:var(--dim); margin-bottom:9px; overflow:hidden; position:relative; }
+.gauge-fill {
+  height:100%; width:5%; transition:width 0.2s, background 0.3s;
+  background:linear-gradient(90deg,var(--green),var(--cyan)); position:relative;
+}
+.gauge-fill::after { content:''; position:absolute; right:0; top:0; bottom:0; width:3px; background:white; opacity:0.7; filter:blur(1px); }
+.gauge-ticks { display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text); opacity:0.6; }
+
+/* Timeline */
+.timeline-section { padding:14px 20px; border-bottom:1px solid var(--border); }
+.timeline-label { font-size:0.65rem; letter-spacing:0.2em; color:var(--text); text-transform:uppercase; margin-bottom:9px; opacity:0.7; }
+.timeline-track { height:30px; background:var(--dim); display:flex; align-items:stretch; gap:1px; overflow:hidden; }
+.timeline-cell { flex:1; background:var(--dim); transition:background 0.2s; min-width:3px; }
+
+/* Features */
+.features-section { padding:16px 20px; border-bottom:1px solid var(--border); }
+.features-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.feat-row { display:flex; flex-direction:column; gap:4px; }
+.feat-name { font-size:0.65rem; letter-spacing:0.1em; color:var(--text); text-transform:uppercase; }
+.feat-bar-bg { height:4px; background:var(--dim); }
+.feat-bar-fill { height:100%; background:var(--cyan); width:0%; transition:width 0.15s, background 0.3s; }
+
+/* Clues */
+.clues-section { flex:1; overflow:hidden; display:flex; flex-direction:column; }
+.clues-header { padding:14px 20px 12px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); }
+.clues-log { flex:1; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
+.clue-card { border:1px solid var(--border); padding:12px 14px; display:flex; flex-direction:column; gap:6px; animation:slideIn 0.3s ease; }
+@keyframes slideIn { from{opacity:0;transform:translateX(8px)} to{opacity:1;transform:translateX(0)} }
+.clue-card.CRITICAL { border-color:var(--red);   background:rgba(232,64,64,0.05); }
+.clue-card.HIGH     { border-color:var(--amber);  background:rgba(232,161,53,0.04); }
+.clue-card.MEDIUM   { border-color:var(--cyan);   background:rgba(53,180,232,0.04); }
+.clue-top { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.clue-type { font-size:0.62rem; letter-spacing:0.18em; padding:3px 7px; text-transform:uppercase; font-family:var(--font-ui); }
+.clue-type.MICRO-EXPRESSION { background:var(--red-lo);   color:var(--red);   }
+.clue-type.MORPHOLOGY       { background:var(--amber-lo); color:var(--amber); }
+.clue-type.TIMING           { background:var(--cyan-lo);  color:var(--cyan);  }
+.clue-type.LEAKAGE          { background:var(--green-lo); color:var(--green); }
+.clue-label { font-size:0.78rem; color:var(--text-hi); font-family:var(--font-ui); font-weight:700; }
+.clue-detail { font-size:0.72rem; color:var(--text); line-height:1.6; }
+.no-clues { display:flex; align-items:center; justify-content:center; flex:1; font-size:0.78rem; letter-spacing:0.15em; color:var(--text); opacity:0.4; flex-direction:column; gap:10px; }
+.severity-badge { font-size:0.58rem; letter-spacing:0.15em; padding:2px 6px; border-radius:1px; margin-left:auto; flex-shrink:0; }
+.severity-badge.CRITICAL { background:var(--red-lo);  color:var(--red); }
+.severity-badge.HIGH     { background:var(--amber-lo); color:var(--amber); }
+.severity-badge.MEDIUM   { background:var(--cyan-lo);  color:var(--cyan); }
+
+/* AI Analysis panel */
+.ai-panel { border-top:1px solid var(--border); display:flex; flex-direction:column; }
+.ai-btn {
+  padding:4px 12px; border:1px solid var(--cyan); background:transparent;
+  color:var(--cyan); font-family:var(--font-mono); font-size:0.65rem;
+  letter-spacing:0.16em; cursor:pointer; transition:opacity 0.2s;
+}
+.ai-btn:disabled { opacity:0.3; cursor:not-allowed; border-color:var(--border); color:var(--text); }
+.ai-btn.loading  { border-color:var(--amber); color:var(--amber); animation:pulse 1.2s infinite; }
+.ai-body { padding:14px 20px; font-size:0.73rem; line-height:1.65; color:var(--text); min-height:60px; }
+.ai-placeholder { opacity:0.4; font-size:0.7rem; letter-spacing:0.1em; }
+.ai-text { color:var(--text-hi); }
+.ai-meta { margin-top:8px; font-size:0.6rem; letter-spacing:0.12em; color:var(--text); opacity:0.4; }
+
+/* Meta + controls */
+.meta-bar { display:flex; gap:20px; padding:0 20px 12px; font-size:0.68rem; color:var(--text); letter-spacing:0.12em; flex-wrap:wrap; }
+.meta-item { display:flex; gap:7px; }
+.meta-key { opacity:0.5; }
+.meta-val { color:var(--text-hi); font-family:var(--font-ui); }
+
+.controls { padding:14px 20px; border-top:1px solid var(--border); display:flex; gap:10px; }
+.btn {
+  flex:1; padding:11px 0; border:1px solid var(--border); background:transparent;
+  color:var(--text); font-family:var(--font-mono); font-size:0.75rem;
+  letter-spacing:0.2em; text-transform:uppercase; cursor:pointer; transition:all 0.2s;
+}
+.btn:hover { border-color:var(--amber); color:var(--amber); background:rgba(232,161,53,0.05); }
+.btn.primary { border-color:var(--cyan);  color:var(--cyan);  }
+.btn.primary:hover { background:rgba(53,180,232,0.08); }
+.btn.danger  { border-color:var(--red);   color:var(--red);   }
+.btn.danger:hover  { background:rgba(232,64,64,0.08); }
+.btn.success { border-color:var(--green); color:var(--green); }
+.btn.success:hover { background:rgba(53,201,136,0.08); }
+.btn:disabled { opacity:0.3; cursor:not-allowed; }
+
+/* ══════════════════════════════════════
+   RECORD & ANALYSE TAB
+   ══════════════════════════════════════ */
+.record-section {
+  background: var(--dark); display:flex; flex-direction:column;
+  padding: 20px; gap: 16px; overflow: hidden;
+}
+.record-feed-wrap {
+  position:relative; flex:1;
+  background:#050709; border:1px solid var(--border);
+  overflow:hidden; display:flex; align-items:center; justify-content:center;
+}
+#recVideoEl    { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); opacity:0.88; }
+#recPlaybackEl { width:100%; height:100%; object-fit:cover; display:none; background:#000; transform:scaleX(-1); }
+
+.rec-timer {
+  position:absolute; top:14px; left:50%; transform:translateX(-50%);
+  font-family:var(--font-display); font-size:2rem; letter-spacing:0.15em;
+  color:var(--red); text-shadow:0 0 20px rgba(232,64,64,0.5); display:none;
+}
+.rec-timer.active { display:block; }
+.rec-status-badge {
+  position:absolute; top:14px; right:16px; font-size:0.72rem;
+  letter-spacing:0.18em; padding:4px 10px; border:1px solid var(--border);
+  background:rgba(0,0,0,0.75); color:var(--text);
+}
+.rec-controls { display:flex; gap:10px; align-items:center; }
+
+/* Upload zone */
+.upload-zone {
+  border:1px dashed var(--border); padding:18px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:8px; cursor:pointer; transition:all 0.2s;
+  font-size:0.75rem; letter-spacing:0.15em; color:var(--text); text-align:center;
+}
+.upload-zone:hover { border-color:var(--cyan); color:var(--cyan); background:rgba(53,180,232,0.03); }
+.upload-zone.has-file { border-color:var(--green); color:var(--green); background:rgba(53,201,136,0.04); }
+#fileInput { display:none; }
+.upload-icon { font-size:1.5rem; opacity:0.4; }
+
+/* Analysis progress */
+.analysis-progress { display:none; flex-direction:column; gap:10px; padding:16px; border:1px solid var(--border); background:var(--panel); }
+.analysis-progress.active { display:flex; }
+.prog-label { font-size:0.75rem; letter-spacing:0.2em; color:var(--amber); }
+.prog-bar-bg { height:5px; background:var(--dim); }
+.prog-bar-fill { height:100%; background:var(--amber); width:0%; transition:width 0.3s; }
+.prog-detail { font-size:0.68rem; letter-spacing:0.12em; color:var(--text); opacity:0.7; }
+
+/* ══════════════════════════════════════
+   REPORT PANEL
+   ══════════════════════════════════════ */
+.report-panel { background:var(--panel); display:flex; flex-direction:column; overflow:hidden; }
+
+.empty-report {
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  flex:1; gap:14px; font-size:0.78rem; letter-spacing:0.18em;
+  color:var(--text); opacity:0.4; padding:40px; text-align:center;
+}
+.empty-report-icon { font-size:3rem; opacity:0.3; }
+
+#reportContent { display:none; flex:1; overflow:hidden; flex-direction:column; }
+
+.report-verdict { padding:20px; border-bottom:1px solid var(--border); }
+.verdict-display { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+.verdict-score { font-family:var(--font-display); font-size:4.5rem; line-height:1; color:var(--white); }
+.verdict-right { display:flex; flex-direction:column; gap:7px; }
+.verdict-tag { font-size:0.78rem; letter-spacing:0.2em; text-transform:uppercase; padding:5px 12px; border:1px solid var(--border); color:var(--text); }
+.verdict-sub { font-size:0.65rem; letter-spacing:0.12em; color:var(--text); opacity:0.6; }
+
+.report-stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.stat-cell { display:flex; flex-direction:column; gap:3px; padding:9px 10px; background:var(--dim); border:1px solid var(--border); }
+.stat-key { font-size:0.6rem; letter-spacing:0.18em; color:var(--text); text-transform:uppercase; opacity:0.6; }
+.stat-val { font-size:1rem; color:var(--text-hi); font-family:var(--font-ui); font-weight:700; }
+
+.report-chart-section { padding:14px 20px; border-bottom:1px solid var(--border); }
+#reportChart { width:100%; height:68px; display:block; }
+
+.key-moments-section { padding:14px 20px; border-bottom:1px solid var(--border); }
+.moments-scroll { display:flex; gap:9px; overflow-x:auto; padding-bottom:4px; }
+.moment-card { flex-shrink:0; width:104px; border:1px solid var(--border); cursor:pointer; transition:border-color 0.2s; }
+.moment-card:hover { border-color:var(--amber); }
+.moment-card.CRITICAL { border-color:var(--red); }
+.moment-card.HIGH     { border-color:var(--amber); }
+.moment-thumb { width:104px; height:78px; object-fit:cover; display:block; background:var(--dim); }
+.moment-meta { padding:5px 7px; }
+.moment-time  { font-size:0.6rem; letter-spacing:0.1em; color:var(--amber); margin-bottom:2px; }
+.moment-score { font-size:0.65rem; letter-spacing:0.1em; color:var(--red); font-weight:700; }
+.moment-clues { font-size:0.55rem; opacity:0.5; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+.clue-freq-section { flex:1; overflow-y:auto; padding:14px 20px; }
+.freq-row { display:flex; align-items:center; gap:9px; margin-bottom:9px; }
+.freq-label { font-size:0.68rem; letter-spacing:0.1em; color:var(--text); flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.freq-bar-bg { width:64px; height:5px; background:var(--dim); flex-shrink:0; }
+.freq-bar-fill { height:100%; background:var(--red); }
+.freq-count { font-size:0.68rem; color:var(--amber); font-family:var(--font-ui); width:24px; text-align:right; flex-shrink:0; }
+
+@media (max-width: 900px) {
+  /* Use small viewport height so iPhone browser chrome doesn't clip content */
+  .main {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    height: auto;
+    min-height: calc(100svh - 122px);
+  }
+
+  /* Camera section: fixed aspect ratio so it doesn't get crushed */
+  .camera-section {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  /* Lock the feed to a 4:3 ratio regardless of screen height */
+  .camera-feed-wrap {
+    flex: none;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    height: auto;
+  }
+
+  /* Emotion strip: 3 columns instead of 6 to avoid tiny squashed labels */
+  .emotion-strip {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  /* Right panel: natural height, scrollable */
+  .right-panel, .report-panel {
+    overflow-y: auto;
+    height: auto;
+    max-height: none;
+  }
+
+  /* Tighten header text on small screens */
+  .logo-sub { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <div class="logo-block">
+    <div class="logo">VERITY</div>
+    <div class="logo-sub">Facial Deception Analysis System<br>Ekman–Friesen Micro-Expression Framework</div>
+  </div>
+  <div class="header-right">
+    <div class="status-pill">
+      <div class="status-dot" id="sysStatus"></div>
+      <span id="sysLabel">OFFLINE</span>
+    </div>
+
+  </div>
+</header>
+
+<!-- Mode tabs -->
+<div class="mode-tabs">
+  <div class="mode-tab active" id="tabLive"   onclick="switchTab('live')">  <div class="tab-dot"></div>LIVE ANALYSIS</div>
+  <div class="mode-tab"        id="tabRecord" onclick="switchTab('record')"><div class="tab-dot"></div>RECORD &amp; ANALYSE</div>
+</div>
+
+<div class="main">
+
+  <!-- ══════════ LIVE TAB ══════════ -->
+  <div class="panel-view active" id="viewLive">
+
+    <div class="camera-section">
+      <div class="camera-header">
+        <div class="section-label">Live Feed — Subject Analysis</div>
+        <div id="frameCounter" style="font-size:0.72rem;letter-spacing:0.14em;color:var(--text)">FRAME 0000</div>
+      </div>
+      <div class="camera-feed-wrap">
+        <video id="videoEl" autoplay muted playsinline></video>
+        <canvas id="canvasEl"></canvas>
+        <div class="feed-overlay">
+          <div class="corner tl"></div><div class="corner tr"></div>
+          <div class="corner bl"></div><div class="corner br"></div>
+          <div class="feed-label">CAM-01 · LIVE</div>
+          <div class="rec-indicator"><div class="rec-dot"></div>REC</div>
+        </div>
+        <div id="noFaceOverlay">
+          <div class="no-face-icon">⬜</div>
+          <span>NO SUBJECT DETECTED</span>
+          <span style="opacity:0.5;font-size:0.72rem">Position face within frame</span>
+        </div>
+      </div>
+      <div class="calibration-bar" id="calBar">
+        <span id="calPhaseLabel">SETTLING</span>
+        <div class="cal-progress"><div class="cal-fill" id="calFill"></div></div>
+        <span id="calPct">0%</span>
+      </div>
+      <div class="quality-banner" id="qualBanner">
+        <span id="qualIcon">◉</span>
+        <span id="qualText">BASELINE READY</span>
+      </div>
+      <div class="emotion-strip" id="emotionStrip"></div>
+    </div>
+
+    <div class="right-panel">
+      <div class="deception-section">
+        <div class="meter-title">Deception Index</div>
+        <div class="deception-score-display">
+          <div class="score-big" id="scoreDisplay">0</div>
+          <div class="score-pct">%</div>
+          <div class="score-label" id="verdictLabel">AWAITING DATA</div>
+        </div>
+        <div class="gauge-track"><div class="gauge-fill" id="gaugeFill"></div></div>
+        <div class="gauge-ticks"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+      </div>
+
+      <div class="timeline-section">
+        <div class="timeline-label">Deception History (90 frames)</div>
+        <div class="timeline-track" id="timelineTrack"></div>
+      </div>
+
+      <div class="features-section">
+        <div class="section-label" style="margin-bottom:13px">Facial Region Activity</div>
+        <div class="features-grid" id="featureGrid"></div>
+      </div>
+
+      <div class="clues-section">
+        <div class="clues-header">
+          <div class="section-label">Deception Clues</div>
+          <div id="clueCount" style="font-size:0.72rem;color:var(--text);letter-spacing:0.12em">0 ACTIVE</div>
+        </div>
+        <div class="clues-log" id="cluesLog">
+          <div class="no-clues"><span>⬡</span><span>NO DECEPTION INDICATORS</span></div>
+        </div>
+      </div>
+
+      <!-- AI Analysis panel -->
+      <div class="ai-panel" id="aiPanel">
+        <div class="clues-header">
+          <div class="section-label">◎ AI ANALYSIS</div>
+          <button class="ai-btn" id="aiBtn" onclick="requestAIAnalysis()" disabled>REQUEST</button>
+        </div>
+        <div class="ai-body" id="aiBody">
+          <div class="ai-placeholder">Collect 10+ seconds of data, then request a Claude-powered forensic narrative.</div>
+        </div>
+      </div>
+
+      <div class="meta-bar">
+        <div class="meta-item"><span class="meta-key">ELAPSED</span><span class="meta-val" id="metaElapsed">0.0s</span></div>
+        <div class="meta-item"><span class="meta-key">DOMINANT</span><span class="meta-val" id="metaDominant">—</span></div>
+        <div class="meta-item"><span class="meta-key">CONF</span><span class="meta-val" id="metaConf">—</span></div>
+      </div>
+      <div class="controls">
+        <button class="btn" onclick="resetSession()">↺ RESET</button>
+        <button class="btn primary" id="startBtn" onclick="toggleCamera()">▶ START CAMERA</button>
+      </div>
+    </div>
+
+  </div><!-- /viewLive -->
+
+  <!-- ══════════ RECORD TAB ══════════ -->
+  <div class="panel-view" id="viewRecord">
+
+    <div class="record-section">
+      <div class="camera-header">
+        <div class="section-label">Record Subject for Analysis</div>
+        <div id="recFrameInfo" style="font-size:0.72rem;letter-spacing:0.12em;color:var(--text)"></div>
+      </div>
+
+      <div class="record-feed-wrap">
+        <video id="recVideoEl" autoplay muted playsinline></video>
+        <video id="recPlaybackEl" controls></video>
+        <div class="feed-overlay">
+          <div class="corner tl"></div><div class="corner tr"></div>
+          <div class="corner bl"></div><div class="corner br"></div>
+        </div>
+        <div class="rec-timer" id="recTimer">00:00</div>
+        <div class="rec-status-badge" id="recStatusBadge">INITIALISING...</div>
+      </div>
+
+      <div class="analysis-progress" id="analysisProgress">
+        <div class="prog-label">◎ ANALYSING VIDEO — PLEASE WAIT</div>
+        <div class="prog-bar-bg"><div class="prog-bar-fill" id="progFill"></div></div>
+        <div class="prog-detail" id="progDetail">Uploading to analysis engine...</div>
+      </div>
+
+      <div class="rec-controls">
+        <button class="btn primary" id="recStartBtn" onclick="startRecording()">⏺ START REC</button>
+        <button class="btn danger"  id="recStopBtn"  onclick="stopRecording()"  disabled>⏹ STOP</button>
+        <button class="btn success" id="recAnalyseBtn" onclick="analyseRecording()" disabled>▶ ANALYSE</button>
+        <button class="btn" id="recClearBtn" onclick="clearRecording()" style="flex:0;padding:11px 16px" disabled>✕</button>
+      </div>
+
+      <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+        <div class="upload-icon">↑</div>
+        <span>OR UPLOAD A VIDEO FILE</span>
+        <span style="opacity:0.5;font-size:0.65rem">MP4 · MOV · WEBM — max 200 MB</span>
+        <span id="uploadFileName" style="color:var(--green);display:none;font-size:0.72rem"></span>
+      </div>
+      <input type="file" id="fileInput" accept="video/*" onchange="handleFileUpload(event)">
+
+      <div id="recSizeInfo" style="font-size:0.65rem;letter-spacing:0.12em;color:var(--text);opacity:0.5"></div>
+    </div>
+
+    <!-- Report panel -->
+    <div class="report-panel">
+      <div class="empty-report" id="emptyReport">
+        <div class="empty-report-icon">◎</div>
+        <span>RECORD OR UPLOAD A VIDEO</span>
+        <span style="opacity:0.5;font-size:0.65rem">Analysis report will appear here</span>
+      </div>
+
+      <div id="reportContent">
+        <div class="report-verdict">
+          <div class="verdict-display">
+            <div class="verdict-score" id="rScore">0</div>
+            <div style="font-family:var(--font-display);font-size:1.4rem;color:var(--text);margin-bottom:4px">%</div>
+            <div class="verdict-right">
+              <div class="verdict-tag" id="rVerdict">—</div>
+              <div class="verdict-sub" id="rDuration">—</div>
+            </div>
+          </div>
+          <div class="report-stats" id="reportStats"></div>
+        </div>
+
+        <div class="report-chart-section">
+          <div class="timeline-label" style="margin-bottom:9px">Deception Score Over Time</div>
+          <canvas id="reportChart"></canvas>
+        </div>
+
+        <div class="key-moments-section">
+          <div class="timeline-label" style="margin-bottom:10px">Key Moments — Click to Seek</div>
+          <div class="moments-scroll" id="momentsScroll">
+            <div style="font-size:0.68rem;color:var(--text);opacity:0.4;letter-spacing:0.12em">No flagged moments</div>
+          </div>
+        </div>
+
+        <div class="clue-freq-section">
+          <div class="timeline-label" style="margin-bottom:10px">Most Frequent Deception Clues</div>
+          <div id="clueFreqList"></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /viewRecord -->
+
+</div><!-- /main -->
+
+<script>
+// ═══════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════
+const EMOTIONS = ['happiness','surprise','fear','anger','disgust','sadness'];
+const EMO_COLORS = {
+  happiness:'#35c988', surprise:'#35b4e8', fear:'#9b59b6',
+  anger:'#e84040', disgust:'#e8a135', sadness:'#5ba3d9'
+};
+const FEATURES_DISPLAY = {
+  inner_brow_raise:'Inner Brow Raise', outer_brow_raise:'Outer Brow Raise',
+  brow_gap:'Brow Convergence',         eye_aperture:'Eye Aperture',
+  lower_lid_tension:'Lower Lid Tension', cheek_raise:'Cheek Elevation',
+  mouth_width:'Mouth Width',           mouth_open:'Mouth Aperture',
+  lip_corner_dir:'Lip Corner Dir',     upper_lip_raise:'Upper Lip Raise',
+  lip_press:'Lip Press',               nose_wrinkle:'Nose Wrinkle',
+};
+
+// ── Session ID — persists across page reloads; unique per tab ──
+const SESSION_ID = (() => {
+  const key = 'verity_session_id';
+  let sid = sessionStorage.getItem(key);   // sessionStorage = per-tab, per-session
+  if (!sid) { sid = crypto.randomUUID(); sessionStorage.setItem(key, sid); }
+  return sid;
+})();
+
+// ═══════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════
+const liveState = { running:false, frameCount:0, deceptionHistory:[], sessionLog:[], analysisInterval:null };
+const recState  = { mediaRecorder:null, chunks:[], blob:null, uploadFile:null, timerInterval:null, seconds:0 };
+let recStream   = null;
+
+// ═══════════════════════════════════════════════════
+// Tab switching
+// ═══════════════════════════════════════════════════
+function switchTab(tab) {
+  document.getElementById('tabLive').classList.toggle('active', tab==='live');
+  document.getElementById('tabRecord').classList.toggle('active', tab==='record');
+  document.querySelectorAll('.panel-view').forEach(v => v.classList.remove('active'));
+  document.getElementById(tab==='live' ? 'viewLive' : 'viewRecord').classList.add('active');
+  if (tab === 'record') startRecordCameraPreview();
+}
+
+// ═══════════════════════════════════════════════════
+// Build live-tab UI components
+// ═══════════════════════════════════════════════════
+function initUI() {
+  // Emotion bars
+  const strip = document.getElementById('emotionStrip');
+  EMOTIONS.forEach(e => {
+    strip.innerHTML += `<div class="emo-cell">
+      <div class="emo-label">${e}</div>
+      <div class="emo-bar-bg"><div class="emo-bar-fill" id="emoBar-${e}" style="background:${EMO_COLORS[e]}"></div></div>
+      <div class="emo-value" id="emoVal-${e}">0.00</div></div>`;
+  });
+  // Feature bars
+  const grid = document.getElementById('featureGrid');
+  Object.entries(FEATURES_DISPLAY).forEach(([k,label]) => {
+    grid.innerHTML += `<div class="feat-row">
+      <div class="feat-name">${label}</div>
+      <div class="feat-bar-bg"><div class="feat-bar-fill" id="feat-${k}"></div></div></div>`;
+  });
+  // Timeline cells
+  const track = document.getElementById('timelineTrack');
+  for (let i=0;i<90;i++) track.innerHTML += `<div class="timeline-cell" id="tc-${i}"></div>`;
+}
+
+// ═══════════════════════════════════════════════════
+// LIVE ANALYSIS
+// ═══════════════════════════════════════════════════
+const video  = document.getElementById('videoEl');
+const canvas = document.getElementById('canvasEl');
+const ctx    = canvas.getContext('2d');
+
+async function toggleCamera() {
+  liveState.running ? stopCamera() : await startCamera();
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'}});
+    video.srcObject = stream;
+    await video.play();
+
+    // Health check: warn but never block analysis from starting.
+    // The camera video plays *before* this point — if we returned here
+    // on failure the user would see the camera feed with a frozen UI.
+    try {
+      const health = await fetch('/health').then(r => r.json());
+      if (!health || health.status !== 'ok') {
+        setStatus('warning', 'BACKEND WARMING UP');
+      }
+    } catch(e) {
+      setStatus('warning', 'BACKEND UNREACHABLE');
+      console.warn('Health check failed:', e);
+      // Fall through — analysis loop may still work once backend is ready
+    }
+
+    liveState.running = true;
+    document.getElementById('startBtn').textContent = '⏹ STOP';
+    if (liveState.running) setStatus('active', 'ACTIVE');
+    liveState.analysisInterval = setInterval(captureAndAnalyse, 120);
+  } catch(e) { alert('Camera access denied: ' + e.message); }
+}
+
+function stopCamera() {
+  liveState.running = false;
+  clearInterval(liveState.analysisInterval);
+  if (video.srcObject) video.srcObject.getTracks().forEach(t=>t.stop());
+  video.srcObject = null;
+  document.getElementById('startBtn').textContent = '▶ START CAMERA';
+  setStatus('', 'OFFLINE');
+}
+
+function setStatus(cls, label) {
+  document.getElementById('sysStatus').className = 'status-dot ' + cls;
+  document.getElementById('sysLabel').textContent = label;
+}
+
+async function captureAndAnalyse() {
+  if (!liveState.running) return;
+  const off = document.createElement('canvas');
+  off.width = video.videoWidth||640; off.height = video.videoHeight||480;
+  off.getContext('2d').drawImage(video, 0, 0);
+  try {
+    const res  = await fetch('/analyse', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({image: off.toDataURL('image/jpeg', 0.75), session_id: SESSION_ID})
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      updateLiveUI(data);
+    } else if (data.error === 'no_face') {
+      handleNoFace(true);
+    } else {
+      // Surface the error so the user can see what's wrong
+      handleNoFace(false);
+      const msg = (data.message || data.error || 'BACKEND ERROR').substring(0, 28).toUpperCase();
+      setStatus('warning', msg);
+      console.warn('[VERITY] Backend error:', data);
+    }
+  } catch(e) {
+    // Network error — show in status bar, keep loop alive
+    setStatus('warning', 'NETWORK ERROR');
+    console.warn('[VERITY] Fetch error:', e);
+  }
+}
+
+function updateLiveUI(data) {
+  handleNoFace(false);
+  document.getElementById('frameCounter').textContent = `FRAME ${String(data.frame).padStart(4,'0')}`;
+
+  // Calibration — driven by server-side CalibrationState
+  const cal = data.calibration || {};
+  updateCalibrationUI(cal);
+
+  // Emotions
+  const em = data.emotions || {};
+  EMOTIONS.forEach(e => {
+    const v = em[e] || 0;
+    document.getElementById(`emoBar-${e}`).style.width = (v*100)+'%';
+    document.getElementById(`emoVal-${e}`).textContent = v.toFixed(2);
+  });
+
+  // Feature bars
+  const ft = data.features || {};
+  Object.keys(FEATURES_DISPLAY).forEach(k => {
+    const el = document.getElementById(`feat-${k}`);
+    if (!el) return;
+    const raw = ft[k] || 0;
+    el.style.width      = Math.min(Math.abs(raw)*300, 100)+'%';
+    el.style.background = raw < 0 ? 'var(--amber)' : 'var(--cyan)';
+  });
+
+  // Deception score
+  const dec   = data.deception || {};
+  const score = Math.round((dec.deception_score||0)*100);
+  updateDeceptionScore(score);
+
+  liveState.deceptionHistory.push(score);
+  if (liveState.deceptionHistory.length > 90) liveState.deceptionHistory.shift();
+  updateTimeline();
+  updateClues(dec.clues || []);
+
+  // Session log for AI analysis — rolling 5-min window (sampled at ~8fps = ~2400 max)
+  liveState.sessionLog.push({
+    deception_score: dec.deception_score || 0,
+    clues:           dec.clues           || [],
+    emotions:        data.emotions       || {},
+    elapsed:         data.elapsed        || 0,
+  });
+  if (liveState.sessionLog.length > 2400) liveState.sessionLog.shift();
+  // Enable AI button once there's 10s of data
+  const aiBtn = document.getElementById('aiBtn');
+  if (aiBtn && liveState.sessionLog.length >= 10) aiBtn.disabled = false;
+
+  document.getElementById('metaElapsed').textContent  = data.elapsed + 's';
+  document.getElementById('metaDominant').textContent = (dec.dominant_emotion||'—').toUpperCase();
+  document.getElementById('metaConf').textContent     = ((dec.emotion_confidence||0)*100).toFixed(0)+'%';
+
+  drawOverlay(data);
+}
+
+// ── Calibration UI ─────────────────────────────────────
+let _calFlashed = false;   // only show quality banner once per session
+
+function updateCalibrationUI(cal) {
+  const bar    = document.getElementById('calBar');
+  const fill   = document.getElementById('calFill');
+  const pctEl  = document.getElementById('calPct');
+  const lbl    = document.getElementById('calPhaseLabel');
+  const banner = document.getElementById('qualBanner');
+
+  if (cal.phase === 'settling') {
+    bar.classList.remove('hidden');
+    lbl.textContent   = 'SETTLING  ·  HOLD STILL';
+    fill.style.width  = '0%';
+    pctEl.textContent = '—';
+
+  } else if (cal.phase === 'collecting') {
+    bar.classList.remove('hidden');
+    lbl.textContent   = 'CALIBRATING BASELINE  ·  HOLD NEUTRAL';
+    fill.style.width  = cal.progress + '%';
+    pctEl.textContent = cal.progress + '%';
+
+  } else if (cal.phase === 'active') {
+    bar.classList.add('hidden');
+
+    // Show quality flash once when we first go active
+    if (!_calFlashed) {
+      _calFlashed = true;
+      const good = cal.quality >= 0.5;
+      banner.className = 'quality-banner show ' + (good ? 'good' : 'warn');
+      document.getElementById('qualIcon').textContent = good ? '◉' : '⚠';
+      document.getElementById('qualText').textContent = good
+        ? `BASELINE LOCKED  ·  QUALITY ${Math.round(cal.quality*100)}%`
+        : `LOW QUALITY BASELINE (${Math.round(cal.quality*100)}%)  ·  CONSIDER RECALIBRATING`;
+      setTimeout(() => { banner.classList.remove('show'); }, good ? 4000 : 8000);
+    }
+  }
+}
+
+function updateDeceptionScore(score) {
+  document.getElementById('scoreDisplay').textContent = score;
+  const gauge   = document.getElementById('gaugeFill');
+  const verdict = document.getElementById('verdictLabel');
+  const big     = document.getElementById('scoreDisplay');
+
+  gauge.style.width = score + '%';
+
+  if (score < 25) {
+    gauge.style.background  = 'linear-gradient(90deg,var(--green),var(--cyan))';
+    verdict.textContent     = 'TRUTHFUL';
+    verdict.style.color     = 'var(--green)';
+    verdict.style.borderColor = 'var(--green-lo)';
+    big.style.color         = 'var(--white)';
+    if (liveState.running) setStatus('active', 'ACTIVE');
+  } else if (score < 55) {
+    gauge.style.background  = 'linear-gradient(90deg,var(--cyan),var(--amber))';
+    verdict.textContent     = 'INCONCLUSIVE';
+    verdict.style.color     = 'var(--amber)';
+    verdict.style.borderColor = 'var(--amber-lo)';
+    big.style.color         = 'var(--amber)';
+    if (liveState.running) setStatus('warning', 'MONITORING');
+  } else {
+    gauge.style.background  = 'linear-gradient(90deg,var(--amber),var(--red))';
+    verdict.textContent     = 'DECEPTION LIKELY';
+    verdict.style.color     = 'var(--red)';
+    verdict.style.borderColor = 'var(--red-lo)';
+    big.style.color         = 'var(--red)';
+    if (liveState.running) setStatus('alert', 'ALERT');
+  }
+}
+
+function updateTimeline() {
+  liveState.deceptionHistory.forEach((score,i) => {
+    const cell = document.getElementById(`tc-${i}`);
+    if (!cell) return;
+    if (!score) { cell.style.background='var(--dim)'; return; }
+    cell.style.background = score<25 ? 'var(--green-lo)' : score<55 ? 'var(--amber-lo)' : 'var(--red-lo)';
+  });
+}
+
+function updateClues(clues) {
+  const log   = document.getElementById('cluesLog');
+  const count = document.getElementById('clueCount');
+  count.textContent = clues.length ? `${clues.length} ACTIVE` : '0 ACTIVE';
+  count.style.color = clues.length ? 'var(--red)' : 'var(--text)';
+  if (!clues.length) {
+    log.innerHTML = `<div class="no-clues"><span>⬡</span><span>NO DECEPTION INDICATORS</span></div>`;
+    return;
+  }
+  log.innerHTML = clues.map(c => `
+    <div class="clue-card ${c.severity}">
+      <div class="clue-top">
+        <span class="clue-type ${c.type}">${c.type}</span>
+        <span class="clue-label">${c.label}</span>
+        <span class="severity-badge ${c.severity}">${c.severity}</span>
+      </div>
+      <div class="clue-detail">${c.detail}</div>
+    </div>`).join('');
+}
+
+function drawOverlay(data) {
+  const vw=video.videoWidth||640, vh=video.videoHeight||480;
+  canvas.width=vw; canvas.height=vh;
+  ctx.clearRect(0,0,vw,vh);
+  const regions = data.regions || {};
+  const score   = (data.deception?.deception_score||0)*100;
+  const color   = score<25?'#35c988':score<55?'#e8a135':'#e84040';
+  const hasClues= (data.deception?.clues||[]).length>0;
+  const rColors = {brow_left:'#35b4e8',brow_right:'#35b4e8',eye_left:'#35c988',eye_right:'#35c988',mouth:hasClues?'#e84040':'#e8a135',nose:'#9b59b6'};
+
+  // Flip the 2D context to match the CSS-mirrored video — landmark coords from the
+  // server are in the original (un-mirrored) camera space, so we mirror the draw
+  // context instead of the canvas element; this keeps HTML overlay text readable.
+  ctx.save();
+  ctx.translate(vw, 0);
+  ctx.scale(-1, 1);
+
+  Object.entries(regions).forEach(([name,pts]) => {
+    if (!pts||pts.length<2) return;
+    ctx.beginPath(); ctx.strokeStyle=rColors[name]||'#fff'; ctx.lineWidth=1; ctx.globalAlpha=0.6;
+    pts.forEach((p,i) => i===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]));
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle=rColors[name]||'#fff'; ctx.globalAlpha=0.06; ctx.fill(); ctx.globalAlpha=1;
+  });
+
+  ctx.restore(); // un-flip before drawing text so it reads left-to-right
+
+  // Text: mirror the centroid x so the label floats above the face in the flipped view
+  const allPts = Object.values(regions).flat();
+  if (allPts.length) {
+    const cx  = allPts.reduce((s,p)=>s+p[0],0)/allPts.length;
+    const mirX = vw - cx;
+    const minY = Math.min(...allPts.map(p=>p[1]))-26;
+    ctx.font='bold 12px Share Tech Mono'; ctx.fillStyle=color; ctx.globalAlpha=0.9;
+    ctx.fillText(`DECEPTION: ${Math.round(score)}%`, mirX-58, minY);
+    ctx.globalAlpha=1;
+  }
+}
+
+function handleNoFace(show) {
+  const ov = document.getElementById('noFaceOverlay');
+  show ? ov.classList.remove('hidden') : ov.classList.add('hidden');
+}
+
+// ═══════════════════════════════════════════════════
+// AI Analysis
+// ═══════════════════════════════════════════════════
+async function requestAIAnalysis() {
+  const btn  = document.getElementById('aiBtn');
+  const body = document.getElementById('aiBody');
+  if (!liveState.sessionLog.length) return;
+
+  btn.disabled = true;
+  btn.classList.add('loading');
+  btn.textContent = 'ANALYSING...';
+  body.innerHTML  = '<div class="ai-placeholder">Claude is reviewing the session data...</div>';
+
+  try {
+    const res = await fetch('/ai_analysis', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ session_id: SESSION_ID, history: liveState.sessionLog }),
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      const ts = new Date().toLocaleTimeString();
+      body.innerHTML = `
+        <div class="ai-text">${data.analysis.replace(/\n/g,'<br>')}</div>
+        <div class="ai-meta">Generated ${ts} · ${liveState.sessionLog.length} samples · Claude ${_ANTHROPIC_MODEL_LABEL}</div>`;
+    } else {
+      body.innerHTML = `<div class="ai-placeholder" style="color:var(--amber)">${data.message || data.error}</div>`;
+    }
+  } catch (e) {
+    body.innerHTML = `<div class="ai-placeholder" style="color:var(--red)">Request failed: ${e.message}</div>`;
+  } finally {
+    btn.classList.remove('loading');
+    btn.disabled    = false;
+    btn.textContent = 'REFRESH';
+  }
+}
+const _ANTHROPIC_MODEL_LABEL = 'claude-sonnet-4';
+
+async function resetSession() {
+  await fetch('/reset', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({session_id: SESSION_ID})
+  });
+  // Reset client state
+  liveState.deceptionHistory = []; liveState.frameCount = 0; liveState.sessionLog = [];
+  _calFlashed = false;
+  document.getElementById('aiBtn').disabled  = true;
+  document.getElementById('aiBtn').textContent = 'REQUEST';
+  document.getElementById('aiBody').innerHTML  = '<div class="ai-placeholder">Collect 10+ seconds of data, then request a Claude-powered forensic narrative.</div>';
+  // Reset calibration bar to settling state
+  const bar = document.getElementById('calBar');
+  bar.classList.remove('hidden');
+  document.getElementById('calPhaseLabel').textContent = 'SETTLING  ·  HOLD STILL';
+  document.getElementById('calFill').style.width = '0%';
+  document.getElementById('calPct').textContent  = '—';
+  document.getElementById('qualBanner').className = 'quality-banner';
+  // Reset readouts
+  document.getElementById('frameCounter').textContent = 'FRAME 0000';
+  document.getElementById('metaElapsed').textContent  = '0.0s';
+  document.getElementById('metaDominant').textContent = '—';
+  document.getElementById('metaConf').textContent     = '—';
+  document.getElementById('scoreDisplay').textContent = '0';
+  updateDeceptionScore(0); updateTimeline(); updateClues([]);
+}
+
+// ═══════════════════════════════════════════════════
+// RECORD & ANALYSE
+// ═══════════════════════════════════════════════════
+const recVideo    = document.getElementById('recVideoEl');
+const recPlayback = document.getElementById('recPlaybackEl');
+
+async function startRecordCameraPreview() {
+  if (recStream) return;
+  try {
+    recStream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'},audio:false});
+    recVideo.srcObject = recStream;
+    recVideo.style.display = 'block';
+    recPlayback.style.display = 'none';
+    document.getElementById('recStatusBadge').textContent = 'CAMERA READY';
+  } catch(e) {
+    document.getElementById('recStatusBadge').textContent = 'NO CAMERA';
+  }
+}
+
+function startRecording() {
+  if (!recStream) { alert('Camera not available'); return; }
+  clearRecording(true);  // clear state but keep stream
+
+  const opts = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? {mimeType:'video/webm;codecs=vp9'}
+             : MediaRecorder.isTypeSupported('video/webm')             ? {mimeType:'video/webm'}
+             : {};
+  recState.mediaRecorder = new MediaRecorder(recStream, opts);
+  recState.chunks = [];
+
+  recState.mediaRecorder.ondataavailable = e => { if(e.data.size>0) recState.chunks.push(e.data); };
+  recState.mediaRecorder.onstop = () => {
+    recState.blob = new Blob(recState.chunks, {type: recState.mediaRecorder.mimeType||'video/webm'});
+    const url = URL.createObjectURL(recState.blob);
+    recPlayback.src = url;
+    recPlayback.style.display = 'block';
+    recVideo.style.display    = 'none';
+    const mb = (recState.blob.size/1048576).toFixed(1);
+    document.getElementById('recSizeInfo').textContent = `Recording ready · ${mb} MB · ${formatTime(recState.seconds)}`;
+    document.getElementById('recAnalyseBtn').disabled = false;
+    document.getElementById('recClearBtn').disabled   = false;
+    document.getElementById('recStatusBadge').textContent = 'RECORDING READY';
+  };
+
+  recState.mediaRecorder.start(100);
+  recState.seconds = 0;
+  document.getElementById('recTimer').classList.add('active');
+  document.getElementById('recStatusBadge').textContent = '● RECORDING';
+  recState.timerInterval = setInterval(() => {
+    recState.seconds++;
+    document.getElementById('recTimer').textContent = formatTime(recState.seconds);
+    if (recState.seconds >= 300) stopRecording();
+  }, 1000);
+
+  document.getElementById('recStartBtn').disabled   = true;
+  document.getElementById('recStopBtn').disabled    = false;
+  document.getElementById('recAnalyseBtn').disabled = true;
+}
+
+function stopRecording() {
+  if (!recState.mediaRecorder || recState.mediaRecorder.state==='inactive') return;
+  recState.mediaRecorder.stop();
+  clearInterval(recState.timerInterval);
+  document.getElementById('recTimer').classList.remove('active');
+  document.getElementById('recStartBtn').disabled = false;
+  document.getElementById('recStopBtn').disabled  = true;
+}
+
+function clearRecording(keepStream=false) {
+  recState.blob = null; recState.uploadFile = null; recState.chunks = [];
+  if (recState.mediaRecorder && recState.mediaRecorder.state!=='inactive') {
+    try { recState.mediaRecorder.stop(); } catch(_){}
+  }
+  recState.mediaRecorder = null;
+  clearInterval(recState.timerInterval);
+  document.getElementById('recTimer').classList.remove('active');
+  document.getElementById('recTimer').textContent = '00:00';
+  recPlayback.style.display = 'none'; recPlayback.src = '';
+  recVideo.style.display    = 'block';
+  document.getElementById('recStartBtn').disabled   = false;
+  document.getElementById('recStopBtn').disabled    = true;
+  document.getElementById('recAnalyseBtn').disabled = true;
+  document.getElementById('recClearBtn').disabled   = true;
+  document.getElementById('recSizeInfo').textContent = '';
+  document.getElementById('recStatusBadge').textContent = keepStream ? 'CAMERA READY' : 'INITIALISING...';
+  // Reset upload zone
+  document.getElementById('uploadZone').classList.remove('has-file');
+  document.getElementById('uploadFileName').style.display = 'none';
+  document.getElementById('fileInput').value = '';
+}
+
+function handleFileUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  recState.uploadFile = file; recState.blob = null;
+  const mb = (file.size/1048576).toFixed(1);
+  document.getElementById('uploadZone').classList.add('has-file');
+  const fn = document.getElementById('uploadFileName');
+  fn.textContent = `${file.name}  ·  ${mb} MB`; fn.style.display = 'block';
+  document.getElementById('recAnalyseBtn').disabled = false;
+  document.getElementById('recClearBtn').disabled   = false;
+  document.getElementById('recStatusBadge').textContent = 'FILE LOADED';
+  recPlayback.src = URL.createObjectURL(file);
+  recPlayback.style.display = 'block';
+  recVideo.style.display    = 'none';
+}
+
+async function analyseRecording() {
+  const fileToSend = recState.uploadFile
+    || (recState.blob ? new File([recState.blob],'recording.webm',{type:'video/webm'}) : null);
+  if (!fileToSend) { alert('No recording or file to analyse'); return; }
+
+  document.getElementById('recAnalyseBtn').disabled = true;
+  document.getElementById('recStartBtn').disabled   = true;
+  const prog = document.getElementById('analysisProgress');
+  prog.classList.add('active');
+  setProgress(5, 'Uploading video to analysis engine...');
+
+  let pv = 5;
+  const pi = setInterval(() => {
+    if (pv < 85) {
+      pv += Math.random()*4;
+      const msg = pv<30 ? 'Decoding video frames...'
+                : pv<55 ? 'Running MediaPipe face mesh...'
+                : 'Applying Ekman deception analysis...';
+      setProgress(pv, msg);
+    }
+  }, 600);
+
+  const fd = new FormData();
+  fd.append('video', fileToSend);
+
+  try {
+    const res  = await fetch('/analyse_video',{method:'POST',body:fd});
+    clearInterval(pi);
+    if (!res.ok) throw new Error(`Server error ${res.status}`);
+    const data = await res.json();
+    setProgress(100, 'Analysis complete.');
+    setTimeout(() => prog.classList.remove('active'), 800);
+    if (data.status==='ok') renderReport(data);
+    else alert('Analysis failed: ' + (data.error||'Unknown error'));
+  } catch(e) {
+    clearInterval(pi); prog.classList.remove('active');
+    alert('Analysis error: ' + e.message);
+  } finally {
+    document.getElementById('recAnalyseBtn').disabled = false;
+    document.getElementById('recStartBtn').disabled   = false;
+  }
+}
+
+function setProgress(pct, detail) {
+  document.getElementById('progFill').style.width   = Math.min(pct,100)+'%';
+  document.getElementById('progDetail').textContent = detail;
+}
+
+// ═══════════════════════════════════════════════════
+// REPORT RENDERING
+// ═══════════════════════════════════════════════════
+function renderReport(data) {
+  const s  = data.summary;
+  const tl = data.timeline;
+
+  document.getElementById('emptyReport').style.display = 'none';
+  const rc = document.getElementById('reportContent');
+  rc.style.display = 'flex';
+
+  // Verdict header
+  const avg = Math.round(s.avg_deception);
+  const vScore = document.getElementById('rScore');
+  vScore.textContent  = avg;
+  vScore.style.color  = avg<25?'var(--green)':avg<55?'var(--amber)':'var(--red)';
+
+  const vTag = document.getElementById('rVerdict');
+  vTag.textContent      = s.verdict;
+  vTag.style.color      = s.verdict==='TRUTHFUL'?'var(--green)':s.verdict==='INCONCLUSIVE'?'var(--amber)':'var(--red)';
+  vTag.style.borderColor = vTag.style.color;
+
+  document.getElementById('rDuration').textContent = `${s.duration}s · ${s.samples_analysed} frames analysed`;
+
+  // Stats
+  document.getElementById('reportStats').innerHTML = [
+    ['AVG DECEPTION',  s.avg_deception+'%'],
+    ['PEAK DECEPTION', s.max_deception+'%'],
+    ['FACE COVERAGE',  s.face_coverage+'%'],
+    ['SAMPLES',        s.samples_analysed],
+  ].map(([k,v])=>`<div class="stat-cell"><div class="stat-key">${k}</div><div class="stat-val">${v}</div></div>`).join('');
+
+  // Chart
+  drawReportChart(tl, s.duration);
+
+  // Key moments
+  const scroll = document.getElementById('momentsScroll');
+  if (s.key_moments && s.key_moments.length) {
+    scroll.innerHTML = s.key_moments.map(m => {
+      const sev = m.deception_score>0.65?'CRITICAL':m.deception_score>0.45?'HIGH':'MEDIUM';
+      return `<div class="moment-card ${sev}" onclick="seekVideo(${m.t})">
+        <img class="moment-thumb" src="${m.thumb||''}" alt="${m.t}s">
+        <div class="moment-meta">
+          <div class="moment-time">${m.t.toFixed(1)}s</div>
+          <div class="moment-score">${Math.round(m.deception_score*100)}%</div>
+          <div class="moment-clues">${(m.clues||[]).map(c=>c.label).join(' · ').slice(0,32)}</div>
+        </div></div>`;
+    }).join('');
+  } else {
+    scroll.innerHTML = '<div style="font-size:0.68rem;color:var(--text);opacity:0.4;letter-spacing:0.12em">No flagged moments detected</div>';
+  }
+
+  // Clue frequency
+  const fl = document.getElementById('clueFreqList');
+  const maxC = Math.max(...Object.values(s.clue_freq), 1);
+  const entries = Object.entries(s.clue_freq).slice(0,10);
+  fl.innerHTML = entries.length
+    ? entries.map(([label,count]) => `
+      <div class="freq-row">
+        <div class="freq-label">${label}</div>
+        <div class="freq-bar-bg"><div class="freq-bar-fill" style="width:${(count/maxC*100).toFixed(0)}%"></div></div>
+        <div class="freq-count">${count}</div>
+      </div>`).join('')
+    : '<div style="font-size:0.68rem;opacity:0.4;letter-spacing:0.12em">No deception clues detected</div>';
+}
+
+function drawReportChart(timeline, duration) {
+  const cvs = document.getElementById('reportChart');
+  const W   = cvs.parentElement.clientWidth || 320;
+  const H   = 68;
+  cvs.width = W; cvs.height = H;
+  const c   = cvs.getContext('2d');
+  c.clearRect(0,0,W,H);
+
+  // BG
+  c.fillStyle = 'rgba(28,37,53,0.5)'; c.fillRect(0,0,W,H);
+
+  // Threshold lines
+  [[25,'rgba(53,201,136,0.2)'],[55,'rgba(232,64,64,0.2)']].forEach(([thr,col]) => {
+    const y = H-(thr/100)*H;
+    c.strokeStyle=col; c.setLineDash([4,4]); c.lineWidth=1;
+    c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); c.setLineDash([]);
+  });
+
+  const fs = timeline.filter(s=>s.face);
+  if (!fs.length) return;
+
+  // Area
+  const g = c.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'rgba(232,64,64,0.3)');
+  g.addColorStop(0.5,'rgba(232,161,53,0.15)');
+  g.addColorStop(1,'rgba(53,201,136,0.05)');
+  c.beginPath(); c.fillStyle=g;
+  fs.forEach((s,i) => {
+    const x=(s.t/duration)*W, y=H-s.deception_score*H;
+    if(i===0) c.moveTo(x,H);
+    c.lineTo(x,y);
+  });
+  c.lineTo((fs[fs.length-1].t/duration)*W, H);
+  c.closePath(); c.fill();
+
+  // Line
+  c.beginPath(); c.strokeStyle='#e8a135'; c.lineWidth=1.5;
+  fs.forEach((s,i) => {
+    const x=(s.t/duration)*W, y=H-s.deception_score*H;
+    i===0?c.moveTo(x,y):c.lineTo(x,y);
+  });
+  c.stroke();
+}
+
+function seekVideo(t) { recPlayback.currentTime = t; }
+
+// ═══════════════════════════════════════════════════
+// Utilities
+// ═══════════════════════════════════════════════════
+function formatTime(s) {
+  return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+}
+
+// Boot
+initUI();
+</script>
+</body>
+</html>
