@@ -277,14 +277,15 @@ def classify_emotion(f, is_delta=False):
         def gate(val, _raw_floor):
             return max(val - 0.003, 0.0)
         # brow_gap delta < 0  →  brows closer than neutral  →  anger
-        # delta range for genuine furrow ≈ -0.03 to -0.06; multiplier 8 gives 0.24-0.48
-        brow_draw = max(-f["brow_gap"] - 0.003, 0) * 8.0
+        # Reduced multiplier 8→5: genuine furrow delta ~-0.04 gives 0.04*5=0.20 (reasonable)
+        brow_draw = max(-f["brow_gap"] - 0.003, 0) * 5.0
     else:
         # Raw space: use absolute noise floors tuned to typical resting values.
         def gate(val, raw_floor):
             return max(val - raw_floor, 0.0)
-        # brow_gap raw ~0.35; threshold 0.36 means only genuinely furrowed brows score
-        brow_draw = max(0.36 - f["brow_gap"], 0) * 3.0
+        # Tightened threshold 0.36→0.33: only a genuinely furrowed brow scores.
+        # Reduced multiplier 3.0→2.0: prevents moderate furrow from maxing out anger.
+        brow_draw = max(0.33 - f["brow_gap"], 0) * 2.0
 
     scores = {}
 
@@ -315,18 +316,22 @@ def classify_emotion(f, is_delta=False):
 
     # ANGER — brow drawn together + lower lid tension + lip press
     # Ekman: brow draw-together is emblem (easy to fake); eyelid tension often missing (p.149)
+    # lip_press floor raised 0.60→0.72: resting value ~0.72, so only a deliberate
+    # lip compression scores. Prevents ambient mouth-closed state inflating anger.
     scores["anger"] = np.clip(
         0.40 * brow_draw +
         0.35 * gate(f["lower_lid_tension"], 0.150) +
-        0.15 * gate(f["lip_press"],         0.600) +
+        0.15 * gate(f["lip_press"],         0.720) +
         0.10 * gate(f["eye_aperture"],      0.165),
         0, 1)
 
     # DISGUST — upper lip raise + nose wrinkle + lip corners down
     # Ekman: nose wrinkle, upper lip raise easy to fake (p.149)
+    # Floor raised 0.035→0.060, multiplier reduced 4.0→2.5: requires a clear sneer.
+    # nose_wrinkle floor raised 0.060→0.090: only genuine nose scrunch scores.
     scores["disgust"] = np.clip(
-        0.45 * gate(f["upper_lip_raise"], 0.035) * 4.0 +
-        0.35 * gate(f["nose_wrinkle"],    0.060) +
+        0.45 * gate(f["upper_lip_raise"], 0.060) * 2.5 +
+        0.35 * gate(f["nose_wrinkle"],    0.090) +
         0.20 * gate(-f["lip_corner_dir"], 0.010),
         0, 1)
 
