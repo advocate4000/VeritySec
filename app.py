@@ -580,10 +580,7 @@ def process_frame(img_bytes):
     timestamp_history.append(now)
     frame_count += 1
 
-    # Establish baseline from frames 5-35 (skip first few for stabilisation)
-    if 5 <= frame_count <= 35:
-        if frame_count == 35:
-            baseline_features = compute_baseline(list(expression_history)[:30])
+    # Baseline is now set manually via POST /baseline — no auto-capture
 
     # Adjust features relative to baseline.
     # Emotion classification uses delta features once calibration is done —
@@ -677,6 +674,22 @@ def reset():
     frame_count       = 0
     session_start     = time.time()
     return jsonify({"status": "reset"})
+
+
+@app.route("/baseline", methods=["POST"])
+def set_baseline():
+    """
+    Capture the current neutral expression as the personal baseline.
+    Uses the last 30 frames (or however many are available, min 5).
+    Called manually by the user when they are holding a neutral face.
+    """
+    global baseline_features, emotion_ema
+    if len(expression_history) < 5:
+        return jsonify({"error": "Not enough frames — keep your face in view for a moment first"}), 400
+    recent = list(expression_history)[-30:]
+    baseline_features = compute_baseline(recent)
+    emotion_ema = {}   # reset EMA so it doesn't carry pre-baseline values forward
+    return jsonify({"status": "ok", "frames_used": len(recent)})
 
 
 @app.route("/health")
