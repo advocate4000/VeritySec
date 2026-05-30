@@ -118,6 +118,11 @@ baseline_features  = {}
 frame_count        = 0
 session_start      = time.time()
 
+# ── Voice state ───────────────────────────────────────────
+VOICE_HISTORY_LEN = 60          # ~7s at one sample per 120ms
+voice_history  = deque(maxlen=VOICE_HISTORY_LEN)
+voice_baseline = {}             # mean pitch / rms / zcr at neutral
+
 # ── EMA smoothing (α=0.35: fast enough to feel live, slow enough to cut noise) ──
 # Applied server-side so the frontend renders stable values without any extra logic.
 EMA_ALPHA   = 0.35
@@ -543,7 +548,81 @@ def analyse_deception(features, emotions, history_features, history_times):
     }
 
 
-def compute_baseline(features_list):
+def analyse_voice_deception(af, history, baseline):
+    """
+    Vocal deception indicators derived from the deception research literature.
+    Features are computed browser-side (Web Audio API) and sent per-frame.
+
+    Indicators applied:
+      1. Pitch elevation  — F0 rise above personal baseline (stress; Vrij 2008)
+      2. Pitch instability — high CV of F0 across recent frames (arousal / tremor)
+      3. Vocal energy drop — RMS significantly below baseline (suppressed affect)
+    """
+    clues      = []
+    components = []
+
+    pitch    = af.get("pitch",    0.0)
+    rms      = af.get("rms",      0.0)
+    speaking = af.get("speaking", False)
+
+    if not speaking or pitch < 60:
+        return {"voice_score": 0.0, "clues": [], "speaking": False}
+
+    # ── 1. Pitch elevation ────────────────────────────────
+    if baseline.get("pitch", 0) > 60:
+        ratio = pitch / baseline["pitch"]
+        if ratio > 1.12:                      # >12% above personal baseline
+            severity_val = min((ratio - 1.0) * 4, 0.80)
+            components.append(severity_val)
+            clues.append({
+                "type":     "VOICE",
+                "label":    "Elevated Pitch",
+                "detail":   (f"Vocal F0 {int((ratio-1)*100)}% above baseline — pitch elevation "
+                             f"under stress is one of the most replicated voice-deception markers "
+                             f"(Vrij, 2008; DePaulo et al., 2003)"),
+                "severity": "HIGH" if ratio > 1.20 else "MEDIUM",
+            })
+
+    # ── 2. Pitch instability (tremor / arousal) ───────────
+    voiced = [h for h in list(history)[-15:]
+              if h.get("speaking") and h.get("pitch", 0) > 60]
+    if len(voiced) >= 6:
+        pitches = [h["pitch"] for h in voiced]
+        cv = float(np.std(pitches) / (np.mean(pitches) + 1e-6))
+        if cv > 0.12:
+            components.append(min(cv * 3.5, 0.65))
+            clues.append({
+                "type":     "VOICE",
+                "label":    "Pitch Instability",
+                "detail":   ("High F0 variability during speech — vocal tremor or affect "
+                             "modulation; both associated with the cognitive load of deception"),
+                "severity": "MEDIUM",
+            })
+
+    # ── 3. Vocal energy drop ──────────────────────────────
+    if baseline.get("rms", 0) > 0:
+        rms_ratio = rms / (baseline["rms"] + 1e-6)
+        if rms_ratio < 0.60:
+            components.append(0.35)
+            clues.append({
+                "type":     "VOICE",
+                "label":    "Reduced Vocal Energy",
+                "detail":   ("Vocal intensity significantly below baseline — suppressed "
+                             "affect or reduced effort consistent with controlled speech"),
+                "severity": "LOW",
+            })
+
+    voice_score = float(np.mean(components)) if components else 0.0
+    return {
+        "voice_score": round(min(voice_score, 0.90), 3),
+        "clues":       clues,
+        "speaking":    True,
+        "pitch":       round(pitch, 1),
+        "rms":         round(rms, 4),
+    }
+
+
+
     """Compute neutral baseline from first N frames."""
     if not features_list:
         return {}
@@ -558,7 +637,7 @@ def compute_baseline(features_list):
 # Main analysis pipeline
 # ──────────────────────────────────────────────────────────
 
-def process_frame(img_bytes):
+def process_frame(img_bytes, audio_features=None):
     global frame_count, baseline_features, emotion_ema
 
     # Decode image
@@ -636,6 +715,23 @@ def process_frame(img_bytes):
 
     elapsed = round(now - session_start, 1)
 
+    # ── Voice deception analysis ───────────────────────────
+    voice_result = {"voice_score": 0.0, "clues": [], "speaking": False}
+    if audio_features:
+        voice_history.append(audio_features)
+        voice_result = analyse_voice_deception(
+            audio_features, list(voice_history), voice_baseline
+        )
+        # Merge voice clues into the main deception result
+        if voice_result.get("clues"):
+            deception["clues"] = deception.get("clues", []) + voice_result["clues"]
+            # Combine facial + voice scores (60/40 weighted when both active)
+            f_score = deception["deception_score"]
+            v_score = voice_result["voice_score"]
+            combined = 0.60 * f_score + 0.40 * v_score
+            quantity_bonus = min(len(voice_result["clues"]) * 0.04, 0.12)
+            deception["deception_score"] = round(min(combined + quantity_bonus, 0.97), 3)
+
     return {
         "status":           "ok",
         "frame":            frame_count,
@@ -644,6 +740,7 @@ def process_frame(img_bytes):
         "emotions":         emotions,
         "deception":        deception,
         "regions":          regions,
+        "voice":            voice_result,
         "baseline_ready":   bool(baseline_features),
         "calibrating":      frame_count < 35,
     }
@@ -664,17 +761,21 @@ def analyse():
     if not data or "image" not in data:
         return jsonify({"error": "No image provided"}), 400
 
-    img_b64 = data["image"].split(",")[-1]  # strip data:image/...;base64, prefix
-    result  = process_frame(img_b64)
+    img_b64       = data["image"].split(",")[-1]
+    audio_features = data.get("audio")          # optional — None if mic not available
+    result        = process_frame(img_b64, audio_features)
     return jsonify(result)
 
 
 @app.route("/reset", methods=["POST"])
 def reset():
     global frame_count, baseline_features, session_start, emotion_ema
+    global voice_history, voice_baseline
     expression_history.clear()
     timestamp_history.clear()
+    voice_history.clear()
     baseline_features = {}
+    voice_baseline    = {}
     emotion_ema       = {}
     frame_count       = 0
     session_start     = time.time()
@@ -688,13 +789,27 @@ def set_baseline():
     Uses the last 30 frames (or however many are available, min 5).
     Called manually by the user when they are holding a neutral face.
     """
-    global baseline_features, emotion_ema
+    global baseline_features, emotion_ema, voice_baseline
     if len(expression_history) < 5:
         return jsonify({"error": "Not enough frames — keep your face in view for a moment first"}), 400
     recent = list(expression_history)[-30:]
     baseline_features = compute_baseline(recent)
     emotion_ema = {}   # reset EMA so it doesn't carry pre-baseline values forward
-    return jsonify({"status": "ok", "frames_used": len(recent)})
+
+    # Capture voice baseline from recent voiced frames
+    voiced = [v for v in list(voice_history)[-20:]
+              if v.get("speaking") and v.get("pitch", 0) > 60]
+    if voiced:
+        voice_baseline = {
+            "pitch": float(np.mean([v["pitch"] for v in voiced])),
+            "rms":   float(np.mean([v["rms"]   for v in voiced])),
+        }
+
+    return jsonify({
+        "status":        "ok",
+        "frames_used":   len(recent),
+        "voice_baseline": bool(voice_baseline),
+    })
 
 
 @app.route("/health")
