@@ -622,7 +622,7 @@ def analyse_voice_deception(af, history, baseline):
     }
 
 
-
+def compute_baseline(features_list):
     """Compute neutral baseline from first N frames."""
     if not features_list:
         return {}
