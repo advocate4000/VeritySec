@@ -785,31 +785,38 @@ def reset():
 @app.route("/baseline", methods=["POST"])
 def set_baseline():
     """
-    Capture the current neutral expression as the personal baseline.
-    Uses the last 30 frames (or however many are available, min 5).
-    Called manually by the user when they are holding a neutral face.
+    Snapshot the current neutral expression as the personal baseline.
+    Uses the last 30 frames (min 3). Called manually by the user.
     """
     global baseline_features, emotion_ema, voice_baseline
-    if len(expression_history) < 5:
-        return jsonify({"error": "Not enough frames — keep your face in view for a moment first"}), 400
-    recent = list(expression_history)[-30:]
-    baseline_features = compute_baseline(recent)
-    emotion_ema = {}   # reset EMA so it doesn't carry pre-baseline values forward
+    try:
+        n = len(expression_history)
+        if n < 3:
+            return jsonify({
+                "error": f"Face not detected long enough ({n} frames) — keep face in view and try again"
+            }), 400
 
-    # Capture voice baseline from recent voiced frames
-    voiced = [v for v in list(voice_history)[-20:]
-              if v.get("speaking") and v.get("pitch", 0) > 60]
-    if voiced:
-        voice_baseline = {
-            "pitch": float(np.mean([v["pitch"] for v in voiced])),
-            "rms":   float(np.mean([v["rms"]   for v in voiced])),
-        }
+        recent            = list(expression_history)[-30:]
+        baseline_features = compute_baseline(recent)
+        emotion_ema       = {}
 
-    return jsonify({
-        "status":        "ok",
-        "frames_used":   len(recent),
-        "voice_baseline": bool(voice_baseline),
-    })
+        # Capture voice baseline from recent voiced frames (optional)
+        voiced = [v for v in list(voice_history)[-20:]
+                  if v.get("speaking") and v.get("pitch", 0) > 60]
+        if voiced:
+            voice_baseline = {
+                "pitch": float(np.mean([v["pitch"] for v in voiced])),
+                "rms":   float(np.mean([v["rms"]   for v in voiced])),
+            }
+
+        return jsonify({
+            "status":         "ok",
+            "frames_used":    len(recent),
+            "voice_baseline": bool(voice_baseline),
+        })
+
+    except Exception as exc:
+        return jsonify({"error": f"Server error: {exc}"}), 500
 
 
 @app.route("/health")
