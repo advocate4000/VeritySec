@@ -975,6 +975,10 @@ def process_video_file(path):
         reverse=True
     )[:5]
 
+    # Deep-copy key moments NOW before we strip thumbs from timeline below
+    import copy
+    key_moments = [copy.deepcopy(m) for m in key_moments]
+
     # Clue frequency
     clue_freq = {}
     for c in all_clues:
