@@ -115,6 +115,8 @@ HISTORY_LEN = 90  # ~3 seconds at 30fps
 expression_history = deque(maxlen=HISTORY_LEN)
 timestamp_history  = deque(maxlen=HISTORY_LEN)
 baseline_features  = {}
+baseline_sigma     = {}   # per-feature std dev during neutral — personalised noise floors
+feature_peaks      = {}   # {expr: {feature: raw_mean}} — personalised range scaling
 frame_count        = 0
 session_start      = time.time()
 
@@ -264,94 +266,133 @@ def extract_features(landmarks, w, h):
 
 def classify_emotion(f, is_delta=False):
     """
-    Classify primary emotion from features using Ekman's muscle-movement rules.
-    Returns dict of {emotion: confidence 0-1}
+    Classify primary emotion using Ekman action units.
 
-    is_delta=False  — f contains raw landmark measurements (pre-calibration).
-                      Floors are calibrated for absolute values; brow_gap ~0.35.
-    is_delta=True   — f contains (raw - baseline) delta values (post-calibration).
-                      Floors become small noise thresholds; brow_gap ~0 at neutral.
-                      brow_draw uses negative-delta convention (closer = negative).
+    is_delta=False  — raw features, pre-calibration. Fixed floors.
+    is_delta=True   — baseline-subtracted deltas. Uses per-person sigma as
+                      noise floor (2.5σ) and per-person expression peaks for
+                      range normalisation once guided calibration is complete.
 
-    Without this split, passing delta values to the raw formula gives
-    brow_draw = max(0.36 - 0, 0) * 3 = 1.08 → anger locked at 100%.
+    Normalisation principle (delta mode):
+      score = gate(delta, 2.5σ) / peak_range
+    where peak_range is the observed maximum delta during the calibration
+    expression for that feature. Score of 1.0 = the user's personal maximum.
     """
-    if is_delta:
-        # Delta space: positive = more than baseline, negative = less than baseline.
-        # Use a tiny universal noise floor to reject measurement jitter (~0.003).
-        def gate(val, _raw_floor):
-            return max(val - 0.003, 0.0)
-        # brow_gap delta < 0  →  brows closer than neutral  →  anger
-        # Reduced multiplier 8→5: genuine furrow delta ~-0.04 gives 0.04*5=0.20 (reasonable)
-        brow_draw = max(-f["brow_gap"] - 0.003, 0) * 5.0
-    else:
-        # Raw space: use absolute noise floors tuned to typical resting values.
-        def gate(val, raw_floor):
-            return max(val - raw_floor, 0.0)
-        # Tightened threshold 0.36→0.33: only a genuinely furrowed brow scores.
-        # Reduced multiplier 3.0→2.0: prevents moderate furrow from maxing out anger.
-        brow_draw = max(0.33 - f["brow_gap"], 0) * 2.0
-
     scores = {}
 
-    # HAPPINESS — lip corners up + cheek raise + lower lid crinkle
-    # Ekman: Duchenne smile requires lower lid tension + cheek raise (p.105-120)
-    scores["happiness"] = np.clip(
-        0.40 * gate(f["lip_corner_dir"],    0.015) +
-        0.35 * gate(f["cheek_raise"],       0.010) +
-        0.25 * gate(f["lower_lid_tension"], 0.130),
-        0, 1)
+    if is_delta:
+        def g(val, fk):
+            noise = max(2.5 * baseline_sigma.get(fk, 0), 0.003) if baseline_sigma else 0.003
+            return max(val - noise, 0.0)
 
-    # SURPRISE — outer brow raise + eye wide + jaw drop
-    # Ekman: surprise always brief; prolonged = likely fake (p.148)
-    scores["surprise"] = np.clip(
-        0.40 * gate(f["outer_brow_raise"], 0.010) +
-        0.25 * gate(f["eye_aperture"],     0.165) +
-        0.35 * gate(f["jaw_drop"],         0.005),
-        0, 1)
+        def n(gated, fk, ek, fm=6.0):
+            if not gated:
+                return 0.0
+            if feature_peaks and ek in feature_peaks and baseline_features:
+                raw_pk = feature_peaks[ek].get(fk)
+                if raw_pk is not None:
+                    peak_d = abs(raw_pk - baseline_features.get(fk, 0))
+                    noise  = max(2.5 * baseline_sigma.get(fk, 0), 0.003) if baseline_sigma else 0.003
+                    denom  = max(peak_d - noise, 0.005)
+                    return min(gated / denom, 1.0)
+            return min(gated * fm, 1.0)
 
-    # FEAR — inner brow raise + eye wide + mouth open
-    # Ekman: fear brow hardest to voluntarily produce; reliable leakage site (p.148)
-    scores["fear"] = np.clip(
-        0.50 * gate(f["inner_brow_raise"], 0.008) +
-        0.20 * gate(f["eye_aperture"],     0.165) +
-        0.20 * gate(f["mouth_open"],       0.020) +
-        0.10 * gate(f["mouth_width"],      0.300),
-        0, 1)
+        brow_noise = max(2.5 * baseline_sigma.get('brow_gap', 0), 0.003) if baseline_sigma else 0.003
+        brow_raw   = max(-f["brow_gap"] - brow_noise, 0)
+        if feature_peaks and 'anger' in feature_peaks and baseline_features:
+            pk_gap     = feature_peaks['anger'].get('brow_gap', baseline_features.get('brow_gap', 0.35))
+            bl_gap     = baseline_features.get('brow_gap', 0.35)
+            brow_range = max(bl_gap - pk_gap - brow_noise, 0.005)
+            brow_draw  = min(brow_raw / brow_range, 1.0)
+        else:
+            brow_draw = min(brow_raw * 5.0, 1.0)
 
-    # ANGER — brow drawn together + lower lid tension + lip press
-    # Ekman: brow draw-together is emblem (easy to fake); eyelid tension often missing (p.149)
-    # lip_press floor raised 0.60→0.72: resting value ~0.72, so only a deliberate
-    # lip compression scores. Prevents ambient mouth-closed state inflating anger.
-    scores["anger"] = np.clip(
-        0.40 * brow_draw +
-        0.35 * gate(f["lower_lid_tension"], 0.150) +
-        0.15 * gate(f["lip_press"],         0.720) +
-        0.10 * gate(f["eye_aperture"],      0.165),
-        0, 1)
+        scores["happiness"] = np.clip(
+            0.40 * n(g(f["lip_corner_dir"],   "lip_corner_dir"),   "lip_corner_dir",   "smile") +
+            0.35 * n(g(f["cheek_raise"],       "cheek_raise"),      "cheek_raise",      "smile") +
+            0.25 * n(g(f["lower_lid_tension"], "lower_lid_tension"),"lower_lid_tension","smile"),
+            0, 1)
 
-    # DISGUST — upper lip raise + nose wrinkle + lip corners down
-    # Ekman: nose wrinkle, upper lip raise easy to fake (p.149)
-    # Floor raised 0.035→0.060, multiplier reduced 4.0→2.5: requires a clear sneer.
-    # nose_wrinkle floor raised 0.060→0.090: only genuine nose scrunch scores.
-    scores["disgust"] = np.clip(
-        0.45 * gate(f["upper_lip_raise"], 0.060) * 2.5 +
-        0.35 * gate(f["nose_wrinkle"],    0.090) +
-        0.20 * gate(-f["lip_corner_dir"], 0.010),
-        0, 1)
+        scores["surprise"] = np.clip(
+            0.40 * n(g(f["outer_brow_raise"], "outer_brow_raise"), "outer_brow_raise", "eyebrows") +
+            0.25 * n(g(f["eye_aperture"],     "eye_aperture"),     "eye_aperture",     "eyebrows") +
+            0.35 * n(g(f["jaw_drop"],         "jaw_drop"),         "jaw_drop",         "eyebrows"),
+            0, 1)
 
-    # SADNESS — inner brow raise + lip corners down + cheeks not raised
-    # Ekman: sad brow hard to fake; inner brow corner up in genuine sadness (p.150)
-    scores["sadness"] = np.clip(
-        0.45 * gate(f["inner_brow_raise"],  0.008) +
-        0.35 * gate(-f["lip_corner_dir"],   0.010) +
-        0.20 * gate(-f["cheek_raise"],      0.010),
-        0, 1)
+        scores["fear"] = np.clip(
+            0.50 * n(g(f["inner_brow_raise"], "inner_brow_raise"), "inner_brow_raise", "eyebrows") +
+            0.20 * n(g(f["eye_aperture"],     "eye_aperture"),     "eye_aperture",     "eyebrows") +
+            0.20 * n(g(f["mouth_open"],       "mouth_open"),       "mouth_open",       "eyebrows") +
+            0.10 * n(g(f["mouth_width"],      "mouth_width"),      "mouth_width",      "eyebrows"),
+            0, 1)
 
-    # Normalise so scores sum to 1.
-    # Neutral face in delta mode → all raw scores ≈ 0 → flat ~0.167 each (correct).
+        scores["anger"] = np.clip(
+            0.40 * brow_draw +
+            0.35 * n(g(f["lower_lid_tension"], "lower_lid_tension"), "lower_lid_tension", "anger") +
+            0.15 * n(g(f["lip_press"],         "lip_press"),         "lip_press",         "anger") +
+            0.10 * n(g(f["eye_aperture"],      "eye_aperture"),      "eye_aperture",      "anger"),
+            0, 1)
+
+        scores["disgust"] = np.clip(
+            0.45 * n(g(f["upper_lip_raise"], "upper_lip_raise"), "upper_lip_raise", "anger") * 1.5 +
+            0.35 * n(g(f["nose_wrinkle"],    "nose_wrinkle"),    "nose_wrinkle",    "anger") +
+            0.20 * n(g(-f["lip_corner_dir"], "lip_corner_dir"),  "lip_corner_dir",  "anger"),
+            0, 1)
+
+        scores["sadness"] = np.clip(
+            0.45 * n(g(f["inner_brow_raise"],  "inner_brow_raise"), "inner_brow_raise", "anger") +
+            0.35 * n(g(-f["lip_corner_dir"],   "lip_corner_dir"),   "lip_corner_dir",   "anger") +
+            0.20 * n(g(-f["cheek_raise"],      "cheek_raise"),      "cheek_raise",      "anger"),
+            0, 1)
+
+    else:
+        def gate(val, floor):
+            return max(val - floor, 0.0)
+
+        brow_draw = max(0.33 - f["brow_gap"], 0) * 2.0
+
+        scores["happiness"] = np.clip(
+            0.40 * gate(f["lip_corner_dir"],    0.015) +
+            0.35 * gate(f["cheek_raise"],       0.010) +
+            0.25 * gate(f["lower_lid_tension"], 0.130),
+            0, 1)
+
+        scores["surprise"] = np.clip(
+            0.40 * gate(f["outer_brow_raise"], 0.010) +
+            0.25 * gate(f["eye_aperture"],     0.165) +
+            0.35 * gate(f["jaw_drop"],         0.005),
+            0, 1)
+
+        scores["fear"] = np.clip(
+            0.50 * gate(f["inner_brow_raise"], 0.008) +
+            0.20 * gate(f["eye_aperture"],     0.165) +
+            0.20 * gate(f["mouth_open"],       0.020) +
+            0.10 * gate(f["mouth_width"],      0.300),
+            0, 1)
+
+        scores["anger"] = np.clip(
+            0.40 * brow_draw +
+            0.35 * gate(f["lower_lid_tension"], 0.150) +
+            0.15 * gate(f["lip_press"],         0.720) +
+            0.10 * gate(f["eye_aperture"],      0.165),
+            0, 1)
+
+        scores["disgust"] = np.clip(
+            0.45 * gate(f["upper_lip_raise"], 0.060) * 2.5 +
+            0.35 * gate(f["nose_wrinkle"],    0.090) +
+            0.20 * gate(-f["lip_corner_dir"], 0.010),
+            0, 1)
+
+        scores["sadness"] = np.clip(
+            0.45 * gate(f["inner_brow_raise"],  0.008) +
+            0.35 * gate(-f["lip_corner_dir"],   0.010) +
+            0.20 * gate(-f["cheek_raise"],      0.010),
+            0, 1)
+
     total = sum(scores.values()) + 1e-6
     return {k: round(float(v / total), 3) for k, v in scores.items()}
+
+
 
 # ──────────────────────────────────────────────────────────
 # Ekman Deception Analysis
@@ -623,7 +664,7 @@ def analyse_voice_deception(af, history, baseline):
 
 
 def compute_baseline(features_list):
-    """Compute neutral baseline from first N frames."""
+    """Compute neutral baseline mean from frames. Returns mean dict."""
     if not features_list:
         return {}
     baseline = {}
@@ -631,6 +672,18 @@ def compute_baseline(features_list):
         vals = [f[key] for f in features_list if key in f]
         baseline[key] = float(np.mean(vals)) if vals else 0.0
     return baseline
+
+
+def compute_baseline_sigma(features_list):
+    """Compute per-feature standard deviation from neutral frames.
+    Used as personalised noise floor: 2.5σ replaces fixed gate constants."""
+    if not features_list:
+        return {}
+    sigma = {}
+    for key in features_list[0]:
+        vals = [f[key] for f in features_list if key in f]
+        sigma[key] = float(np.std(vals)) if len(vals) > 1 else 0.005
+    return sigma
 
 
 # ──────────────────────────────────────────────────────────
@@ -733,16 +786,17 @@ def process_frame(img_bytes, audio_features=None):
             deception["deception_score"] = round(min(combined + quantity_bonus, 0.97), 3)
 
     return {
-        "status":           "ok",
-        "frame":            frame_count,
-        "elapsed":          elapsed,
-        "features":         features,
-        "emotions":         emotions,
-        "deception":        deception,
-        "regions":          regions,
-        "voice":            voice_result,
-        "baseline_ready":   bool(baseline_features),
-        "calibrating":      frame_count < 35,
+        "status":              "ok",
+        "frame":               frame_count,
+        "elapsed":             elapsed,
+        "features":            features,
+        "emotions":            emotions,
+        "deception":           deception,
+        "regions":             regions,
+        "voice":               voice_result,
+        "baseline_ready":      bool(baseline_features),
+        "calibrating":         frame_count < 35,
+        "calibration_exprs":   sorted(feature_peaks.keys()),
     }
 
 
@@ -770,11 +824,13 @@ def analyse():
 @app.route("/reset", methods=["POST"])
 def reset():
     global frame_count, baseline_features, session_start, emotion_ema
-    global voice_history, voice_baseline
+    global voice_history, voice_baseline, baseline_sigma, feature_peaks
     expression_history.clear()
     timestamp_history.clear()
     voice_history.clear()
     baseline_features = {}
+    baseline_sigma    = {}
+    feature_peaks     = {}
     voice_baseline    = {}
     emotion_ema       = {}
     frame_count       = 0
@@ -798,6 +854,7 @@ def set_baseline():
 
         recent            = list(expression_history)[-30:]
         baseline_features = compute_baseline(recent)
+        baseline_sigma    = compute_baseline_sigma(recent)   # per-person noise floors
         emotion_ema       = {}
 
         # Capture voice baseline from recent voiced frames (optional)
@@ -813,6 +870,41 @@ def set_baseline():
             "status":         "ok",
             "frames_used":    len(recent),
             "voice_baseline": bool(voice_baseline),
+        })
+
+    except Exception as exc:
+        return jsonify({"error": f"Server error: {exc}"}), 500
+
+
+@app.route("/calibrate", methods=["POST"])
+def calibrate_expression():
+    """
+    Capture the peak feature values for one calibration expression.
+    Called once per expression after the user has been holding it for ~3 seconds.
+    expression: 'eyebrows' | 'smile' | 'anger'
+    Stores raw feature means in feature_peaks[expression] for use in
+    classify_emotion's peak-normalisation path.
+    """
+    global feature_peaks
+    try:
+        data = request.get_json() or {}
+        expr = data.get("expression", "")
+        if expr not in ("eyebrows", "smile", "anger"):
+            return jsonify({"error": f"Unknown expression: {expr}"}), 400
+
+        if len(expression_history) < 3:
+            return jsonify({"error": "Not enough frames — keep face in view"}), 400
+
+        recent = list(expression_history)[-20:]   # last ~2.5s
+        peaks  = {k: float(np.mean([fr[k] for fr in recent if k in fr]))
+                  for k in recent[0]}
+        feature_peaks[expr] = peaks
+
+        return jsonify({
+            "status":     "ok",
+            "expression": expr,
+            "captured":   len(recent),
+            "complete":   sorted(feature_peaks.keys()),
         })
 
     except Exception as exc:
