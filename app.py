@@ -1211,7 +1211,12 @@ Write in a professional forensic tone. Be precise but avoid overclaiming certain
 
 @app.route("/health")
 def health():
-    return jsonify({"status": "ok", "mediapipe": "loaded"})
+    return jsonify({
+        "status":           "ok",
+        "mediapipe":        "loaded",
+        "api_key_set":      bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "api_key_length":   len(os.environ.get("ANTHROPIC_API_KEY", "")),
+    })
 
 
 @app.route("/analyse_video", methods=["POST"])
