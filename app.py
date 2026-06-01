@@ -121,9 +121,14 @@ frame_count        = 0
 session_start      = time.time()
 
 # ── Voice state ───────────────────────────────────────────
-VOICE_HISTORY_LEN = 60          # ~7s at one sample per 120ms
+VOICE_HISTORY_LEN = 90          # ~11s at one sample per 120ms (extended for pause analysis)
 voice_history  = deque(maxlen=VOICE_HISTORY_LEN)
-voice_baseline = {}             # mean pitch / rms / zcr at neutral
+voice_baseline = {}             # mean pitch / rms + new: jitter, syllable_rate, pause_rate
+
+# ── Question segmentation ─────────────────────────────────
+question_current    = 0         # 0 = no questions marked yet
+question_markers    = []        # [{question, elapsed, frame}]
+question_voice_data = {}        # {q_num: {scores:[], clues:[], pitches:[], jitters:[], syllable_rates:[]}}
 
 # ── EMA smoothing (α=0.35: fast enough to feel live, slow enough to cut noise) ──
 # Applied server-side so the frontend renders stable values without any extra logic.
@@ -591,56 +596,131 @@ def analyse_deception(features, emotions, history_features, history_times):
 
 def analyse_voice_deception(af, history, baseline):
     """
-    Vocal deception indicators derived from the deception research literature.
-    Features are computed browser-side (Web Audio API) and sent per-frame.
+    Vocal deception indicators — all features computed browser-side (Web Audio API).
 
-    Indicators applied:
-      1. Pitch elevation  — F0 rise above personal baseline (stress; Vrij 2008)
-      2. Pitch instability — high CV of F0 across recent frames (arousal / tremor)
-      3. Vocal energy drop — RMS significantly below baseline (suppressed affect)
+    Indicators:
+      1. Pitch elevation     — F0 rise above baseline (Vrij 2008; DePaulo 2003)
+      2. Jitter elevation    — pitch-period instability above baseline level
+      3. Pause rate          — more/longer silences than baseline (fabrication load)
+      4. Speech rate change  — syllable rate deviation (slower=fabricating, faster=rehearsed)
+      5. Vocal energy drop   — RMS well below baseline (suppressed/controlled affect)
+      6. Cross-question      — this segment's profile vs session mean (strongest signal)
     """
     clues      = []
     components = []
 
-    pitch    = af.get("pitch",    0.0)
-    rms      = af.get("rms",      0.0)
-    speaking = af.get("speaking", False)
+    pitch         = af.get("pitch",         0.0)
+    rms           = af.get("rms",           0.0)
+    speaking      = af.get("speaking",      False)
+    jitter        = af.get("jitter",        0.0)
+    syllable_rate = af.get("syllable_rate", 0.0)
+    pause_rate    = af.get("pause_rate",    0.0)
 
     if not speaking or pitch < 60:
         return {"voice_score": 0.0, "clues": [], "speaking": False}
 
+    voiced = [h for h in list(history)[-20:]
+              if h.get("speaking") and h.get("pitch", 0) > 60]
+
     # ── 1. Pitch elevation ────────────────────────────────
     if baseline.get("pitch", 0) > 60:
         ratio = pitch / baseline["pitch"]
-        if ratio > 1.12:                      # >12% above personal baseline
-            severity_val = min((ratio - 1.0) * 4, 0.80)
-            components.append(severity_val)
+        if ratio > 1.12:
+            components.append(min((ratio - 1.0) * 4, 0.80))
             clues.append({
                 "type":     "VOICE",
                 "label":    "Elevated Pitch",
-                "detail":   (f"Vocal F0 {int((ratio-1)*100)}% above baseline — pitch elevation "
-                             f"under stress is one of the most replicated voice-deception markers "
-                             f"(Vrij, 2008; DePaulo et al., 2003)"),
+                "detail":   (f"Vocal F0 {int((ratio-1)*100)}% above baseline — pitch "
+                             f"elevation under stress is one of the most replicated "
+                             f"voice-deception markers (Vrij 2008; DePaulo et al. 2003)"),
                 "severity": "HIGH" if ratio > 1.20 else "MEDIUM",
             })
 
-    # ── 2. Pitch instability (tremor / arousal) ───────────
-    voiced = [h for h in list(history)[-15:]
-              if h.get("speaking") and h.get("pitch", 0) > 60]
-    if len(voiced) >= 6:
-        pitches = [h["pitch"] for h in voiced]
-        cv = float(np.std(pitches) / (np.mean(pitches) + 1e-6))
-        if cv > 0.12:
-            components.append(min(cv * 3.5, 0.65))
+    # ── 2. Jitter elevation ───────────────────────────────
+    # Jitter = frame-to-frame pitch period variation / mean period.
+    # Healthy speech: ~0.5–1.0%; stressed larynx: >2%
+    if baseline.get("jitter", 0) > 0 and jitter > 0:
+        jitter_ratio = jitter / baseline["jitter"]
+        if jitter_ratio > 2.0:
+            components.append(min((jitter_ratio - 1.0) * 0.25, 0.60))
             clues.append({
                 "type":     "VOICE",
-                "label":    "Pitch Instability",
-                "detail":   ("High F0 variability during speech — vocal tremor or affect "
-                             "modulation; both associated with the cognitive load of deception"),
+                "label":    "Elevated Vocal Jitter",
+                "detail":   (f"Pitch period instability {int(jitter_ratio)}× above baseline — "
+                             f"laryngeal micro-tremor indicates physiological stress even when "
+                             f"mean pitch appears controlled"),
                 "severity": "MEDIUM",
             })
+    elif jitter > 0.025 and len(voiced) >= 4:
+        # No baseline yet — flag absolute threshold
+        components.append(0.30)
+        clues.append({
+            "type":     "VOICE",
+            "label":    "High Vocal Jitter",
+            "detail":   "Pitch period instability above clinical threshold — possible stress marker",
+            "severity": "LOW",
+        })
 
-    # ── 3. Vocal energy drop ──────────────────────────────
+    # ── 3. Pause rate elevation ───────────────────────────
+    # Count speaking→silent transitions in recent 20-frame window (~2.5s)
+    if len(history) >= 10:
+        window = list(history)[-20:]
+        pauses_in_window = sum(
+            1 for i in range(1, len(window))
+            if window[i-1].get("speaking") and not window[i].get("speaking")
+        )
+        speech_frames = sum(1 for h in window if h.get("speaking"))
+        speech_secs   = speech_frames * 0.12
+
+        if speech_secs > 1.5:
+            recent_pause_rate = pauses_in_window / speech_secs * 60  # pauses/min
+
+            if baseline.get("pause_rate", 0) > 0:
+                pr_ratio = recent_pause_rate / (baseline["pause_rate"] + 1e-6)
+                if pr_ratio > 1.6:
+                    components.append(min((pr_ratio - 1.0) * 0.30, 0.55))
+                    clues.append({
+                        "type":     "VOICE",
+                        "label":    "Elevated Pause Frequency",
+                        "detail":   (f"Pause rate {int(pr_ratio)}× above baseline — increased "
+                                     f"hesitation is associated with the cognitive load of "
+                                     f"fabricating responses (Vrij 2004)"),
+                        "severity": "MEDIUM",
+                    })
+            elif recent_pause_rate > 25:
+                # No baseline — flag high absolute rate
+                components.append(0.25)
+                clues.append({
+                    "type":     "VOICE",
+                    "label":    "Frequent Pausing",
+                    "detail":   "High pause frequency during speech — possible cognitive load indicator",
+                    "severity": "LOW",
+                })
+
+    # ── 4. Speech rate deviation ──────────────────────────
+    if syllable_rate > 0 and baseline.get("syllable_rate", 0) > 0:
+        sr_ratio = syllable_rate / baseline["syllable_rate"]
+        if sr_ratio < 0.65:
+            components.append(min((1.0 - sr_ratio) * 0.70, 0.55))
+            clues.append({
+                "type":     "VOICE",
+                "label":    "Speech Rate Slowing",
+                "detail":   (f"Syllable rate {int((1-sr_ratio)*100)}% below baseline — "
+                             f"slowing is the most consistent speech-rate finding in "
+                             f"deception research, reflecting increased fabrication effort"),
+                "severity": "MEDIUM",
+            })
+        elif sr_ratio > 1.45:
+            components.append(min((sr_ratio - 1.0) * 0.50, 0.45))
+            clues.append({
+                "type":     "VOICE",
+                "label":    "Speech Rate Acceleration",
+                "detail":   (f"Syllable rate {int((sr_ratio-1)*100)}% above baseline — "
+                             f"acceleration can indicate rehearsed or scripted delivery"),
+                "severity": "LOW",
+            })
+
+    # ── 5. Vocal energy drop ──────────────────────────────
     if baseline.get("rms", 0) > 0:
         rms_ratio = rms / (baseline["rms"] + 1e-6)
         if rms_ratio < 0.60:
@@ -648,18 +728,62 @@ def analyse_voice_deception(af, history, baseline):
             clues.append({
                 "type":     "VOICE",
                 "label":    "Reduced Vocal Energy",
-                "detail":   ("Vocal intensity significantly below baseline — suppressed "
-                             "affect or reduced effort consistent with controlled speech"),
+                "detail":   "Vocal intensity significantly below baseline — suppressed affect or reduced effort",
                 "severity": "LOW",
             })
 
+    # ── 6. Cross-question comparison ──────────────────────
+    # Compare this question's vocal profile against the session mean.
+    # Only activates once ≥2 questions are marked and current question has data.
+    if question_current >= 2 and len(question_voice_data) >= 2:
+        # Build session means from all completed questions
+        all_pitches  = []
+        all_jitters  = []
+        all_sr       = []
+        for q, qd in question_voice_data.items():
+            if q != question_current:
+                all_pitches.extend(qd.get("pitches", []))
+                all_jitters.extend(qd.get("jitters", []))
+                all_sr.extend(qd.get("syllable_rates", []))
+
+        if all_pitches and voiced:
+            session_mean_pitch = float(np.mean(all_pitches))
+            current_mean_pitch = float(np.mean([h["pitch"] for h in voiced]))
+            if session_mean_pitch > 60:
+                xq_ratio = current_mean_pitch / session_mean_pitch
+                if xq_ratio > 1.15:
+                    components.append(min((xq_ratio - 1.0) * 3.5, 0.75))
+                    clues.append({
+                        "type":     "VOICE",
+                        "label":    f"Q{question_current}: Pitch Above Session Mean",
+                        "detail":   (f"Pitch on this question is {int((xq_ratio-1)*100)}% "
+                                     f"above the mean across other questions — cross-question "
+                                     f"comparison is the strongest available voice indicator "
+                                     f"as it controls for individual baseline"),
+                        "severity": "HIGH",
+                    })
+
+        if all_jitters and jitter > 0:
+            session_mean_jitter = float(np.mean(all_jitters))
+            if session_mean_jitter > 0 and jitter / session_mean_jitter > 2.0:
+                components.append(0.45)
+                clues.append({
+                    "type":     "VOICE",
+                    "label":    f"Q{question_current}: Jitter Above Session Mean",
+                    "detail":   "Vocal jitter on this question significantly exceeds other questions — strong stress indicator",
+                    "severity": "HIGH",
+                })
+
     voice_score = float(np.mean(components)) if components else 0.0
     return {
-        "voice_score": round(min(voice_score, 0.90), 3),
-        "clues":       clues,
-        "speaking":    True,
-        "pitch":       round(pitch, 1),
-        "rms":         round(rms, 4),
+        "voice_score":    round(min(voice_score, 0.92), 3),
+        "clues":          clues,
+        "speaking":       True,
+        "pitch":          round(pitch, 1),
+        "rms":            round(rms, 4),
+        "jitter":         round(jitter, 4),
+        "syllable_rate":  round(syllable_rate, 2),
+        "pause_rate":     round(pause_rate, 2),
     }
 
 
@@ -778,12 +902,40 @@ def process_frame(img_bytes, audio_features=None):
         # Merge voice clues into the main deception result
         if voice_result.get("clues"):
             deception["clues"] = deception.get("clues", []) + voice_result["clues"]
-            # Combine facial + voice scores (60/40 weighted when both active)
             f_score = deception["deception_score"]
             v_score = voice_result["voice_score"]
             combined = 0.60 * f_score + 0.40 * v_score
             quantity_bonus = min(len(voice_result["clues"]) * 0.04, 0.12)
             deception["deception_score"] = round(min(combined + quantity_bonus, 0.97), 3)
+
+    # ── Accumulate per-question voice stats ───────────────
+    if question_current > 0 and audio_features and audio_features.get("speaking"):
+        if question_current not in question_voice_data:
+            question_voice_data[question_current] = {
+                "scores": [], "clues": [], "pitches": [],
+                "jitters": [], "syllable_rates": []
+            }
+        qd = question_voice_data[question_current]
+        qd["scores"].append(deception["deception_score"])
+        if voice_result.get("clues"):
+            qd["clues"].extend(voice_result["clues"])
+        if audio_features.get("pitch", 0) > 60:
+            qd["pitches"].append(audio_features["pitch"])
+        if audio_features.get("jitter", 0) > 0:
+            qd["jitters"].append(audio_features["jitter"])
+        if audio_features.get("syllable_rate", 0) > 0:
+            qd["syllable_rates"].append(audio_features["syllable_rate"])
+
+    # Build question summary for the frontend
+    q_summaries = {}
+    for q, qd in question_voice_data.items():
+        if qd["scores"]:
+            q_summaries[q] = {
+                "avg": round(float(np.mean(qd["scores"])) * 100, 1),
+                "max": round(float(np.max(qd["scores"]))  * 100, 1),
+                "n_clues": len(set(c["label"] for c in qd["clues"])),
+                "n_frames": len(qd["scores"]),
+            }
 
     return {
         "status":              "ok",
@@ -797,6 +949,9 @@ def process_frame(img_bytes, audio_features=None):
         "baseline_ready":      bool(baseline_features),
         "calibrating":         frame_count < 35,
         "calibration_exprs":   sorted(feature_peaks.keys()),
+        "question_current":    question_current,
+        "question_summaries":  q_summaries,
+        "question_markers":    question_markers[-20:],
     }
 
 
@@ -821,18 +976,40 @@ def analyse():
     return jsonify(result)
 
 
+@app.route("/mark_question", methods=["POST"])
+def mark_question():
+    """Mark the start of a new question for cross-question voice comparison."""
+    global question_current, question_markers
+    question_current += 1
+    question_markers.append({
+        "question": question_current,
+        "elapsed":  round(time.time() - session_start, 1),
+        "frame":    frame_count,
+    })
+    # Initialise accumulator for this question
+    question_voice_data[question_current] = {
+        "scores": [], "clues": [], "pitches": [],
+        "jitters": [], "syllable_rates": []
+    }
+    return jsonify({"status": "ok", "question": question_current})
+
+
 @app.route("/reset", methods=["POST"])
 def reset():
     global frame_count, baseline_features, session_start, emotion_ema
     global voice_history, voice_baseline, baseline_sigma, feature_peaks
+    global question_current, question_markers, question_voice_data
     expression_history.clear()
     timestamp_history.clear()
     voice_history.clear()
-    baseline_features = {}
-    baseline_sigma    = {}
-    feature_peaks     = {}
-    voice_baseline    = {}
-    emotion_ema       = {}
+    baseline_features  = {}
+    baseline_sigma     = {}
+    feature_peaks      = {}
+    voice_baseline     = {}
+    emotion_ema        = {}
+    question_current   = 0
+    question_markers   = []
+    question_voice_data = {}
     frame_count       = 0
     session_start     = time.time()
     return jsonify({"status": "reset"})
@@ -862,8 +1039,12 @@ def set_baseline():
                   if v.get("speaking") and v.get("pitch", 0) > 60]
         if voiced:
             voice_baseline = {
-                "pitch": float(np.mean([v["pitch"] for v in voiced])),
-                "rms":   float(np.mean([v["rms"]   for v in voiced])),
+                "pitch":         float(np.mean([v["pitch"] for v in voiced])),
+                "rms":           float(np.mean([v["rms"]   for v in voiced])),
+                "jitter":        float(np.mean([v.get("jitter", 0) for v in voiced])),
+                "syllable_rate": float(np.mean([v["syllable_rate"] for v in voiced
+                                                if v.get("syllable_rate", 0) > 0]) or 0),
+                "pause_rate":    float(np.mean([v.get("pause_rate", 0) for v in voiced])),
             }
 
         return jsonify({
