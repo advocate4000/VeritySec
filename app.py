@@ -1092,6 +1092,123 @@ def calibrate_expression():
         return jsonify({"error": f"Server error: {exc}"}), 500
 
 
+@app.route("/ai_analysis", methods=["POST"])
+def ai_analysis():
+    """
+    Aggregate session data and call the Anthropic API to generate
+    a forensic deception narrative. Requires ANTHROPIC_API_KEY env var.
+    """
+    import urllib.request as _ur
+    import json as _json
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return jsonify({
+            "status":  "error",
+            "message": "ANTHROPIC_API_KEY environment variable not set — add it in your Render dashboard under Environment.",
+        })
+
+    try:
+        data    = request.get_json() or {}
+        history = data.get("history", [])
+
+        if len(history) < 5:
+            return jsonify({"status": "error", "message": "Not enough data — collect more session data first."})
+
+        # ── Aggregate session statistics ───────────────────────────
+        scores  = [h.get("deception_score", 0) for h in history]
+        elapsed = [h.get("elapsed", 0)         for h in history]
+        duration = max(elapsed) if elapsed else 0
+
+        # Trend: split into thirds and compare averages
+        n = len(scores)
+        t1 = float(np.mean(scores[:n//3]))      if n >= 3 else 0
+        t2 = float(np.mean(scores[n//3:2*n//3])) if n >= 3 else 0
+        t3 = float(np.mean(scores[2*n//3:]))    if n >= 3 else 0
+        trend = "escalating" if t3 > t1 + 0.08 else ("de-escalating" if t1 > t3 + 0.08 else "stable")
+
+        # Emotion dominance across session
+        emotion_totals = {}
+        for h in history:
+            for em, val in (h.get("emotions") or {}).items():
+                emotion_totals[em] = emotion_totals.get(em, 0) + val
+        dominant_emotion = max(emotion_totals, key=emotion_totals.get) if emotion_totals else "—"
+
+        # Clue frequency
+        clue_freq: dict = {}
+        voice_clue_freq: dict = {}
+        for h in history:
+            for c in (h.get("clues") or []):
+                label = c.get("label", "")
+                if c.get("type") == "VOICE":
+                    voice_clue_freq[label] = voice_clue_freq.get(label, 0) + 1
+                else:
+                    clue_freq[label] = clue_freq.get(label, 0) + 1
+
+        top_clues = sorted(clue_freq.items(), key=lambda x: -x[1])[:5]
+        top_voice = sorted(voice_clue_freq.items(), key=lambda x: -x[1])[:3]
+
+        # Peak moments (top 3 frames by score)
+        peaks = sorted(enumerate(scores), key=lambda x: -x[1])[:3]
+        peak_strs = [f"{elapsed[i]:.0f}s ({scores[i]*100:.0f}%)" for i, _ in peaks if i < len(elapsed)]
+
+        # ── Build prompt ───────────────────────────────────────────
+        clue_text  = "; ".join(f"{l} ({n}×)" for l, n in top_clues)  or "None detected"
+        voice_text = "; ".join(f"{l} ({n}×)" for l, n in top_voice) or "None detected"
+
+        prompt = f"""You are a forensic deception analyst reviewing output from VERITY, a real-time facial and vocal deception detection system based on Paul Ekman & Wallace Friesen's Unmasking the Face (2003).
+
+SESSION SUMMARY
+Duration: {duration:.0f}s  |  Samples: {n}
+Deception score — mean: {np.mean(scores)*100:.1f}%  max: {max(scores)*100:.1f}%  trend: {trend}
+Early period avg: {t1*100:.1f}%  →  Mid: {t2*100:.1f}%  →  Late: {t3*100:.1f}%
+Dominant emotion detected: {dominant_emotion}
+
+FACIAL DECEPTION CLUES (by frequency)
+{clue_text}
+
+VOICE DECEPTION CLUES (by frequency)
+{voice_text}
+
+PEAK DECEPTION MOMENTS
+{', '.join(peak_strs) if peak_strs else 'None above threshold'}
+
+Using the Ekman framework, write a concise forensic narrative (4–6 sentences) that:
+1. States the overall verdict and confidence level
+2. Interprets the trend pattern (escalating/stable/de-escalating) in terms of what it indicates about truthfulness over the session
+3. Identifies the most diagnostically significant clues and what they reveal
+4. Notes any voice-facial incongruence if both channels show data
+5. Gives a brief actionable interpretation for the examiner
+
+Write in a professional forensic tone. Be precise but avoid overclaiming certainty — acknowledge that no system can determine deception with absolute confidence."""
+
+        # ── Call Anthropic API ─────────────────────────────────────
+        payload = _json.dumps({
+            "model":      "claude-sonnet-4-6",
+            "max_tokens": 600,
+            "messages":   [{"role": "user", "content": prompt}],
+        }).encode()
+
+        req = _ur.Request(
+            "https://api.anthropic.com/v1/messages",
+            data    = payload,
+            headers = {
+                "Content-Type":      "application/json",
+                "x-api-key":         api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            method = "POST",
+        )
+        with _ur.urlopen(req, timeout=30) as resp:
+            result   = _json.loads(resp.read())
+            analysis = result["content"][0]["text"]
+
+        return jsonify({"status": "ok", "analysis": analysis})
+
+    except Exception as exc:
+        return jsonify({"status": "error", "message": f"Analysis failed: {exc}"}), 500
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "mediapipe": "loaded"})
