@@ -1173,14 +1173,18 @@ VOICE DECEPTION CLUES (by frequency)
 PEAK DECEPTION MOMENTS
 {', '.join(peak_strs) if peak_strs else 'None above threshold'}
 
-Using the Ekman framework, write a concise forensic narrative (4–6 sentences) that:
-1. States the overall verdict and confidence level
-2. Interprets the trend pattern (escalating/stable/de-escalating) in terms of what it indicates about truthfulness over the session
-3. Identifies the most diagnostically significant clues and what they reveal
-4. Notes any voice-facial incongruence if both channels show data
-5. Gives a brief actionable interpretation for the examiner
+Return ONLY a valid JSON object — no markdown, no preamble, no explanation outside the JSON. Use this exact schema:
 
-Write in a professional forensic tone. Be precise but avoid overclaiming certainty — acknowledge that no system can determine deception with absolute confidence."""
+{{
+  "verdict": "TRUTHFUL" | "INCONCLUSIVE" | "DECEPTION LIKELY",
+  "confidence": "LOW" | "MEDIUM" | "HIGH",
+  "narrative": "3-4 sentences interpreting the overall pattern, trend, and most significant clues in professional forensic language.",
+  "key_findings": ["concise finding 1", "concise finding 2", "concise finding 3"],
+  "voice_summary": "1-2 sentences on voice indicators and their significance, or null if no voice data.",
+  "examiner_note": "One actionable sentence for the examiner on what to probe next or what to treat with caution."
+}}
+
+Be precise but do not overclaim certainty — no system can determine deception with absolute confidence."""
 
         # ── Call Anthropic API ─────────────────────────────────────
         payload = _json.dumps({
@@ -1201,9 +1205,32 @@ Write in a professional forensic tone. Be precise but avoid overclaiming certain
         )
         with _ur.urlopen(req, timeout=30) as resp:
             result   = _json.loads(resp.read())
-            analysis = result["content"][0]["text"]
+            raw_text = result["content"][0]["text"].strip()
 
-        return jsonify({"status": "ok", "analysis": analysis})
+        # Strip any accidental markdown fences
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:]
+
+        try:
+            report = _json.loads(raw_text)
+        except Exception:
+            # Fallback: return raw text if JSON parsing fails
+            return jsonify({"status": "ok", "report": None, "raw": raw_text})
+
+        # Attach session stats so the frontend can render the metrics row
+        report["stats"] = {
+            "mean":     round(float(np.mean(scores)) * 100, 1),
+            "peak":     round(float(np.max(scores))  * 100, 1),
+            "trend":    trend,
+            "duration": round(duration),
+            "samples":  n,
+            "dominant": dominant_emotion,
+            "top_clues":  [l for l, _ in top_clues],
+            "top_voice":  [l for l, _ in top_voice],
+        }
+        return jsonify({"status": "ok", "report": report})
 
     except Exception as exc:
         return jsonify({"status": "error", "message": f"Analysis failed: {exc}"}), 500
