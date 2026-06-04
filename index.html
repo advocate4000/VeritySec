@@ -1566,7 +1566,7 @@ function closeReport() {
   document.getElementById('reportModal').classList.remove('open');
 }
 
-function renderAIReport(report) {
+function renderReport(report) {
   const s = report.stats || {};
   const vk = (report.verdict || '').toLowerCase();
   const verdictCls = vk.includes('deception') ? 'deception' : vk.includes('inconclusive') ? 'inconclusive' : 'truthful';
@@ -1625,7 +1625,7 @@ async function requestAIAnalysis() {
 
     if (data.status === 'ok' && data.report) {
       body.innerHTML = '<div class="ai-placeholder" style="color:var(--green)">✓ Report generated — opening now...</div>';
-      renderAIReport(data.report);
+      renderReport(data.report);
     } else if (data.status === 'ok' && data.raw) {
       document.getElementById('rptNarrative').textContent = data.raw;
       document.getElementById('rptVerdictLabel').textContent = 'REPORT';
