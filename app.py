@@ -32,7 +32,12 @@ _MODEL_URL  = (
 _MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "face_landmarker.task")
 
 def _ensure_model():
-    """Download FaceLandmarker model on first run (~5 MB)."""
+    """Download FaceLandmarker model on first run (~5 MB). Re-downloads if corrupted."""
+    MIN_SIZE = 1_000_000  # real model is ~5 MB; anything under 1 MB is corrupt
+    corrupt = os.path.exists(_MODEL_PATH) and os.path.getsize(_MODEL_PATH) < MIN_SIZE
+    if corrupt:
+        print("[VERITY] Model file appears corrupt — re-downloading...", flush=True)
+        os.remove(_MODEL_PATH)
     if not os.path.exists(_MODEL_PATH):
         print("[VERITY] Downloading FaceLandmarker model (~5 MB) …", flush=True)
         try:
@@ -983,6 +988,7 @@ def analyse_hr_deception(bpm, quality, history, baseline_bpm, current_deception_
 
     h, w = frame.shape[:2]
     rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    rgb   = np.ascontiguousarray(rgb)   # MediaPipe requires contiguous memory
 
     # Run MediaPipe (Tasks API: wrap ndarray in mp.Image, unpack face_landmarks)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -994,20 +1000,22 @@ def analyse_hr_deception(bpm, quality, history, baseline_bpm, current_deception_
     features = extract_features(lms, w, h)
 
     # ── rPPG: extract forehead colour signal ──────────────
-    iod_dist = max(math.dist(
-        [lms[33].x * w,  lms[33].y * h],
-        [lms[263].x * w, lms[263].y * h]
-    ), 1.0)
-    rgb_result = extract_forehead_rgb(frame, lms, w, h, iod_dist)
-    hr_result  = {"bpm": 0.0, "quality": 0.0, "hr_score": 0.0,
-                  "clues": [], "elevation": 0}
-
-    if rgb_result is not None:
-        _, _, _, g_norm = rgb_result
-        rppg_buffer.append({"t": time.time(), "g_norm": g_norm})
-        bpm, quality = compute_hr_bpm(rppg_buffer)
-        if bpm > 0:
-            hr_history.append({"t": time.time(), "bpm": bpm, "quality": quality})
+    # Wrapped in try/except — rPPG must never prevent face analysis from completing
+    hr_result = {"bpm": 0.0, "quality": 0.0, "hr_score": 0.0, "clues": [], "elevation": 0}
+    try:
+        iod_dist = max(math.dist(
+            [lms[33].x * w,  lms[33].y * h],
+            [lms[263].x * w, lms[263].y * h]
+        ), 1.0)
+        rgb_result = extract_forehead_rgb(frame, lms, w, h, iod_dist)
+        if rgb_result is not None:
+            _, _, _, g_norm = rgb_result
+            rppg_buffer.append({"t": time.time(), "g_norm": g_norm})
+            bpm, quality = compute_hr_bpm(rppg_buffer)
+            if bpm > 0:
+                hr_history.append({"t": time.time(), "bpm": bpm, "quality": quality})
+    except Exception as e:
+        print(f"[VERITY] rPPG error (non-fatal): {e}", flush=True)
 
     # Store history
     now = time.time()
@@ -1083,21 +1091,23 @@ def analyse_hr_deception(bpm, quality, history, baseline_bpm, current_deception_
             deception["deception_score"] = round(min(combined + quantity_bonus, 0.97), 3)
 
     # ── HR deception analysis ──────────────────────────────
-    if rppg_buffer and hr_history:
-        latest = hr_history[-1]
-        hr_result = analyse_hr_deception(
-            latest['bpm'], latest['quality'],
-            list(hr_history), hr_baseline,
-            deception['deception_score']
-        )
-        if hr_result.get('clues'):
-            deception['clues'] = deception.get('clues', []) + hr_result['clues']
-            hr_score = hr_result['hr_score']
-            existing = deception['deception_score']
-            # Cardiac is weighted 30% when present — strongest single channel
-            combined = 0.55 * existing + 0.15 * (voice_result.get('voice_score',0)) + 0.30 * hr_score
-            quantity_bonus = min(len(hr_result['clues']) * 0.05, 0.12)
-            deception['deception_score'] = round(min(combined + quantity_bonus, 0.97), 3)
+    try:
+        if rppg_buffer and hr_history:
+            latest = hr_history[-1]
+            hr_result = analyse_hr_deception(
+                latest['bpm'], latest['quality'],
+                list(hr_history), hr_baseline,
+                deception['deception_score']
+            )
+            if hr_result.get('clues'):
+                deception['clues'] = deception.get('clues', []) + hr_result['clues']
+                hr_score = hr_result['hr_score']
+                existing = deception['deception_score']
+                combined = 0.55 * existing + 0.15 * (voice_result.get('voice_score',0)) + 0.30 * hr_score
+                quantity_bonus = min(len(hr_result['clues']) * 0.05, 0.12)
+                deception['deception_score'] = round(min(combined + quantity_bonus, 0.97), 3)
+    except Exception as e:
+        print(f"[VERITY] HR analysis error (non-fatal): {e}", flush=True)
 
     # ── Accumulate per-question voice stats ───────────────
     if question_current > 0 and audio_features and audio_features.get("speaking"):
