@@ -977,7 +977,7 @@ def analyse_hr_deception(bpm, quality, history, baseline_bpm, current_deception_
     }
 
 
-
+def process_frame(img_bytes, audio_features=None):
     global frame_count, baseline_features, emotion_ema
 
     # Decode image
