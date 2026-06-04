@@ -125,7 +125,15 @@ VOICE_HISTORY_LEN = 90          # ~11s at one sample per 120ms (extended for pau
 voice_history  = deque(maxlen=VOICE_HISTORY_LEN)
 voice_baseline = {}             # mean pitch / rms + new: jitter, syllable_rate, pause_rate
 
-# ── Question segmentation ─────────────────────────────────
+# ── rPPG (remote photoplethysmography) ───────────────────
+# Extracts heart rate from subtle skin colour changes in the forehead ROI.
+# Green channel carries the strongest blood-volume pulse; normalized against
+# total intensity to cancel ambient light drift.
+RPPG_BUFFER_LEN = 250          # ~31s at 8fps (120ms send interval)
+rppg_buffer  = deque(maxlen=RPPG_BUFFER_LEN)   # {t, g_norm} per frame
+hr_history   = deque(maxlen=60)                  # rolling BPM estimates
+hr_baseline  = 0.0             # resting BPM captured at SET BASELINE
+hr_signal_quality = 0.0        # 0-1, updated each computation
 question_current    = 0         # 0 = no questions marked yet
 question_markers    = []        # [{question, elapsed, frame}]
 question_voice_data = {}        # {q_num: {scores:[], clues:[], pitches:[], jitters:[], syllable_rates:[]}}
@@ -814,7 +822,157 @@ def compute_baseline_sigma(features_list):
 # Main analysis pipeline
 # ──────────────────────────────────────────────────────────
 
-def process_frame(img_bytes, audio_features=None):
+def extract_forehead_rgb(frame, lms, w, h, iod):
+    """
+    Extract mean RGB from the forehead skin ROI.
+    Uses landmark 9 (glabella) as centre and landmark 10 (upper forehead) as top.
+    ROI width is 80% of IOD for good coverage without eyebrow contamination.
+    Returns (r, g, b, g_norm) where g_norm = g / (r+g+b) cancels lighting drift.
+    """
+    try:
+        cx  = int(lms[9].x  * w)
+        cy  = int(lms[9].y  * h)
+        ty  = int(lms[10].y * h)
+        half = max(int(iod * 0.40), 8)
+        x1, x2 = max(0, cx - half), min(w, cx + half)
+        y1, y2 = max(0, ty),        min(h, cy)
+        if x2 <= x1 or y2 <= y1 or (y2 - y1) < 4:
+            return None
+        roi   = frame[y1:y2, x1:x2]          # BGR in OpenCV
+        mean_b = float(np.mean(roi[:, :, 0]))
+        mean_g = float(np.mean(roi[:, :, 1]))
+        mean_r = float(np.mean(roi[:, :, 2]))
+        total  = mean_r + mean_g + mean_b + 1e-6
+        return mean_r, mean_g, mean_b, mean_g / total
+    except Exception:
+        return None
+
+
+def compute_hr_bpm(buf):
+    """
+    Estimate heart rate from rolling rPPG buffer using FFT.
+    Algorithm:
+      1. Detrend signal (subtract 3rd-order polynomial — removes slow drift)
+      2. Apply Hanning window (reduces spectral leakage)
+      3. Zero-padded FFT for sub-0.1 Hz frequency resolution
+      4. Dominant frequency in cardiac band (0.7–3.5 Hz = 42–210 BPM)
+    Returns (bpm, quality) where quality 0→1 indicates SNR in cardiac band.
+    """
+    if len(buf) < 40:
+        return 0.0, 0.0
+
+    entries  = list(buf)
+    times    = np.array([e['t']      for e in entries])
+    g_signal = np.array([e['g_norm'] for e in entries])
+
+    # Estimate actual sampling rate from timestamps
+    dts = np.diff(times)
+    fs  = float(1.0 / np.mean(dts)) if len(dts) > 0 and np.mean(dts) > 0 else 8.0
+    fs  = float(np.clip(fs, 3.0, 30.0))
+
+    # Detrend: subtract fitted polynomial to remove slow lighting changes
+    x      = np.linspace(0, 1, len(g_signal))
+    coeffs = np.polyfit(x, g_signal, 3)
+    signal = g_signal - np.polyval(coeffs, x)
+
+    # Hanning window
+    signal = signal * np.hanning(len(signal))
+
+    # Zero-padded FFT (4× zero-padding improves frequency resolution)
+    n_fft   = max(len(signal) * 4, 512)
+    fft_mag = np.abs(np.fft.rfft(signal, n=n_fft))
+    freqs   = np.fft.rfftfreq(n_fft, d=1.0 / fs)
+
+    # Cardiac bandpass 0.7–3.5 Hz
+    mask = (freqs >= 0.7) & (freqs <= 3.5)
+    if not np.any(mask):
+        return 0.0, 0.0
+
+    cardiac_mag  = fft_mag[mask]
+    cardiac_freq = freqs[mask]
+    peak_idx     = int(np.argmax(cardiac_mag))
+    peak_freq    = float(cardiac_freq[peak_idx])
+    peak_mag     = float(cardiac_mag[peak_idx])
+    mean_mag     = float(np.mean(cardiac_mag))
+
+    # SNR-based quality: peak / mean in cardiac band
+    # SNR ~1 = pure noise; SNR ~10+ = clean PPG signal
+    snr     = peak_mag / (mean_mag + 1e-6)
+    quality = float(np.clip((snr - 1.5) / 8.0, 0.0, 1.0))
+
+    bpm = peak_freq * 60.0
+    return round(float(bpm), 1), round(quality, 3)
+
+
+def analyse_hr_deception(bpm, quality, history, baseline_bpm, current_deception_score):
+    """
+    Heart rate deception indicators.
+    Only fires when signal quality is sufficient (>0.25) and baseline is set.
+    Indicators:
+      1. HR elevation above baseline  — autonomic arousal (hardest to fake)
+      2. Rising HR trend              — acute stress response
+      3. HR–face incongruence         — elevated HR with low facial deception score
+    """
+    clues      = []
+    components = []
+
+    if bpm <= 0 or quality < 0.25:
+        return {"hr_score": 0.0, "clues": [], "bpm": bpm, "quality": quality}
+
+    # ── 1. Elevation above baseline ───────────────────────
+    if baseline_bpm > 0:
+        elevation = bpm - baseline_bpm
+        if elevation > 12:
+            sev_val = float(np.clip(elevation / 35.0, 0, 0.85))
+            components.append(sev_val)
+            clues.append({
+                "type":     "CARDIAC",
+                "label":    "Elevated Heart Rate",
+                "detail":   (f"HR {int(elevation)} BPM above resting baseline — autonomic "
+                             f"arousal; heart rate is controlled by the involuntary nervous "
+                             f"system and cannot be suppressed through facial management"),
+                "severity": "HIGH" if elevation > 22 else "MEDIUM",
+            })
+
+    # ── 2. Rising trend ───────────────────────────────────
+    recent_bpms = [h['bpm'] for h in list(history)[-12:] if h['bpm'] > 0]
+    older_bpms  = [h['bpm'] for h in list(history)[-24:-12] if h['bpm'] > 0]
+    if len(recent_bpms) >= 4 and len(older_bpms) >= 4:
+        trend = float(np.mean(recent_bpms) - np.mean(older_bpms))
+        if trend > 8:
+            components.append(float(np.clip(trend / 25.0, 0, 0.60)))
+            clues.append({
+                "type":     "CARDIAC",
+                "label":    "Rising Heart Rate",
+                "detail":   (f"HR increasing {int(trend)} BPM over recent period — "
+                             f"acute stress escalation consistent with mounting deceptive pressure"),
+                "severity": "MEDIUM",
+            })
+
+    # ── 3. HR–face incongruence ───────────────────────────
+    # High HR + low facial deception score = controlled presentation
+    if baseline_bpm > 0 and (bpm - baseline_bpm) > 15 and current_deception_score < 0.30:
+        components.append(0.65)
+        clues.append({
+            "type":     "CARDIAC",
+            "label":    "HR–Face Incongruence",
+            "detail":   ("Significantly elevated heart rate paired with controlled facial "
+                         "expression — indicates active suppression of visible stress signals; "
+                         "this combination is a strong deception indicator in skilled liars"),
+            "severity": "HIGH",
+        })
+
+    hr_score = float(np.mean(components)) if components else 0.0
+    return {
+        "hr_score": round(min(hr_score, 0.90), 3),
+        "clues":    clues,
+        "bpm":      bpm,
+        "quality":  quality,
+        "elevation": round(bpm - baseline_bpm, 1) if baseline_bpm > 0 else 0,
+    }
+
+
+
     global frame_count, baseline_features, emotion_ema
 
     # Decode image
@@ -834,6 +992,22 @@ def process_frame(img_bytes, audio_features=None):
 
     lms      = detection.face_landmarks[0]   # list of NormalizedLandmark (same .x/.y/.z)
     features = extract_features(lms, w, h)
+
+    # ── rPPG: extract forehead colour signal ──────────────
+    iod_dist = max(math.dist(
+        [lms[33].x * w,  lms[33].y * h],
+        [lms[263].x * w, lms[263].y * h]
+    ), 1.0)
+    rgb_result = extract_forehead_rgb(frame, lms, w, h, iod_dist)
+    hr_result  = {"bpm": 0.0, "quality": 0.0, "hr_score": 0.0,
+                  "clues": [], "elevation": 0}
+
+    if rgb_result is not None:
+        _, _, _, g_norm = rgb_result
+        rppg_buffer.append({"t": time.time(), "g_norm": g_norm})
+        bpm, quality = compute_hr_bpm(rppg_buffer)
+        if bpm > 0:
+            hr_history.append({"t": time.time(), "bpm": bpm, "quality": quality})
 
     # Store history
     now = time.time()
@@ -908,6 +1082,23 @@ def process_frame(img_bytes, audio_features=None):
             quantity_bonus = min(len(voice_result["clues"]) * 0.04, 0.12)
             deception["deception_score"] = round(min(combined + quantity_bonus, 0.97), 3)
 
+    # ── HR deception analysis ──────────────────────────────
+    if rppg_buffer and hr_history:
+        latest = hr_history[-1]
+        hr_result = analyse_hr_deception(
+            latest['bpm'], latest['quality'],
+            list(hr_history), hr_baseline,
+            deception['deception_score']
+        )
+        if hr_result.get('clues'):
+            deception['clues'] = deception.get('clues', []) + hr_result['clues']
+            hr_score = hr_result['hr_score']
+            existing = deception['deception_score']
+            # Cardiac is weighted 30% when present — strongest single channel
+            combined = 0.55 * existing + 0.15 * (voice_result.get('voice_score',0)) + 0.30 * hr_score
+            quantity_bonus = min(len(hr_result['clues']) * 0.05, 0.12)
+            deception['deception_score'] = round(min(combined + quantity_bonus, 0.97), 3)
+
     # ── Accumulate per-question voice stats ───────────────
     if question_current > 0 and audio_features and audio_features.get("speaking"):
         if question_current not in question_voice_data:
@@ -946,6 +1137,7 @@ def process_frame(img_bytes, audio_features=None):
         "deception":           deception,
         "regions":             regions,
         "voice":               voice_result,
+        "hr":                  hr_result,
         "baseline_ready":      bool(baseline_features),
         "calibrating":         frame_count < 35,
         "calibration_exprs":   sorted(feature_peaks.keys()),
@@ -999,14 +1191,18 @@ def reset():
     global frame_count, baseline_features, session_start, emotion_ema
     global voice_history, voice_baseline, baseline_sigma, feature_peaks
     global question_current, question_markers, question_voice_data
+    global rppg_buffer, hr_history, hr_baseline
     expression_history.clear()
     timestamp_history.clear()
     voice_history.clear()
+    rppg_buffer.clear()
+    hr_history.clear()
     baseline_features  = {}
     baseline_sigma     = {}
     feature_peaks      = {}
     voice_baseline     = {}
     emotion_ema        = {}
+    hr_baseline        = 0.0
     question_current   = 0
     question_markers   = []
     question_voice_data = {}
@@ -1047,10 +1243,17 @@ def set_baseline():
                 "pause_rate":    float(np.mean([v.get("pause_rate", 0) for v in voiced])),
             }
 
+        # Capture resting heart rate from recent clean readings
+        recent_hr = [h['bpm'] for h in list(hr_history)[-20:]
+                     if h['bpm'] > 0 and h.get('quality', 0) > 0.30]
+        if recent_hr:
+            hr_baseline = float(np.mean(recent_hr))
+
         return jsonify({
             "status":         "ok",
             "frames_used":    len(recent),
             "voice_baseline": bool(voice_baseline),
+            "hr_baseline":    round(hr_baseline, 1),
         })
 
     except Exception as exc:
