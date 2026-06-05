@@ -1163,6 +1163,10 @@ def process_frame(img_bytes, audio_features=None):
 
 @app.route("/")
 def index():
+    ua = request.headers.get('User-Agent', '').lower()
+    is_mobile = any(k in ua for k in ['iphone', 'android', 'mobile', 'ipad', 'ipod'])
+    if is_mobile:
+        return render_template("index_mobile.html")
     return render_template("index.html")
 
 
@@ -1227,7 +1231,7 @@ def set_baseline():
     Snapshot the current neutral expression as the personal baseline.
     Uses the last 30 frames (min 3). Called manually by the user.
     """
-    global baseline_features, emotion_ema, voice_baseline
+    global baseline_features, baseline_sigma, emotion_ema, voice_baseline, hr_baseline
     try:
         n = len(expression_history)
         if n < 3:
