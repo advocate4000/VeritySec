@@ -1050,9 +1050,12 @@ def process_frame(img_bytes, audio_features=None):
 
     emotions = {k: round(emotion_ema[k], 3) for k in emotion_ema}
 
-    # Deception analysis
+    # Deception analysis — ALWAYS uses raw features, not delta features.
+    # analyse_deception thresholds (e.g. cheek_raise < 0.02) are calibrated for
+    # absolute landmark distances. Delta features (feature − baseline) are tiny
+    # signed values that would cause every threshold to misfire.
     deception = analyse_deception(
-        adj_features if baseline_features else features,
+        features,
         emotions,
         list(expression_history),
         list(timestamp_history)
@@ -1568,7 +1571,7 @@ def process_video_file(path):
                     adj_features[k] = features[k] - video_baseline[k]
 
         deception = analyse_deception(
-            adj_features if video_baseline else features,
+            features,   # always raw — deception thresholds are absolute, not relative
             emotions,
             all_features,
             all_times,
