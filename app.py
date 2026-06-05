@@ -1368,8 +1368,31 @@ def ai_analysis():
         top_clues = sorted(clue_freq.items(), key=lambda x: -x[1])[:5]
         top_voice = sorted(voice_clue_freq.items(), key=lambda x: -x[1])[:3]
 
+        # Voice metrics aggregation
+        speaking_frames = [h for h in history if h.get("speaking")]
+        total_frames    = len(history)
+        speaking_pct    = round(len(speaking_frames) / max(total_frames, 1) * 100, 1)
+
+        voiced_pitches  = [h["pitch"] for h in speaking_frames if h.get("pitch", 0) > 60]
+        avg_pitch       = round(float(np.mean(voiced_pitches)),  1) if voiced_pitches else 0
+        min_pitch       = round(float(np.min(voiced_pitches)),   1) if voiced_pitches else 0
+        max_pitch       = round(float(np.max(voiced_pitches)),   1) if voiced_pitches else 0
+        pitch_range     = round(max_pitch - min_pitch, 1)
+
+        jitters         = [h["jitter"] for h in speaking_frames if h.get("jitter", 0) > 0]
+        avg_jitter      = round(float(np.mean(jitters)) * 100, 2) if jitters else 0   # as %
+
+        syl_rates       = [h["syllable_rate"] for h in speaking_frames if h.get("syllable_rate", 0) > 0]
+        avg_syl_rate    = round(float(np.mean(syl_rates)), 2) if syl_rates else 0
+
+        pause_rates     = [h["pause_rate"] for h in history if h.get("pause_rate", 0) > 0]
+        avg_pause_rate  = round(float(np.mean(pause_rates)), 2) if pause_rates else 0
+
+        rms_vals        = [h["rms"] for h in speaking_frames if h.get("rms", 0) > 0]
+        avg_rms         = round(float(np.mean(rms_vals)), 4) if rms_vals else 0
+
         # Peak moments (top 3 frames by score)
-        peaks = sorted(enumerate(scores), key=lambda x: -x[1])[:3]
+        peaks    = sorted(enumerate(scores), key=lambda x: -x[1])[:3]
         peak_strs = [f"{elapsed[i]:.0f}s ({scores[i]*100:.0f}%)" for i, _ in peaks if i < len(elapsed)]
 
         # ── Build prompt ───────────────────────────────────────────
@@ -1387,6 +1410,18 @@ Dominant emotion detected: {dominant_emotion}
 FACIAL DECEPTION CLUES (by frequency)
 {clue_text}
 
+VOICE METRICS
+Speaking time: {speaking_pct}% of session
+Pitch — avg: {avg_pitch} Hz  min: {min_pitch} Hz  max: {max_pitch} Hz  range: {pitch_range} Hz
+  (typical speech: 85–180 Hz male / 165–255 Hz female; elevated pitch indicates stress)
+Jitter (pitch instability): {avg_jitter}%
+  (normal < 1.0%; values > 2% suggest vocal stress or tremor)
+Speech rate (syllables/sec): {avg_syl_rate}
+  (typical: 3–5 syl/s; very fast >5.5 or very slow <2 may indicate stress or deliberate control)
+Pause rate (pauses/min of speech): {avg_pause_rate}
+  (elevated rates suggest cognitive load, hesitation, or scripted recall)
+Vocal energy (RMS): {avg_rms}
+
 VOICE DECEPTION CLUES (by frequency)
 {voice_text}
 
@@ -1400,7 +1435,7 @@ Return ONLY a valid JSON object — no markdown, no preamble, no explanation out
   "confidence": "LOW" | "MEDIUM" | "HIGH",
   "narrative": "3-4 sentences interpreting the overall pattern, trend, and most significant clues in professional forensic language.",
   "key_findings": ["concise finding 1", "concise finding 2", "concise finding 3"],
-  "voice_summary": "1-2 sentences on voice indicators and their significance, or null if no voice data.",
+  "voice_summary": "2-3 sentences specifically interpreting the voice metrics above — pitch level and range, jitter, speech rate, pause patterns — and what they suggest about cognitive load or stress. Write null only if speaking_pct is 0.",
   "examiner_note": "One actionable sentence for the examiner on what to probe next or what to treat with caution."
 }}
 
@@ -1409,7 +1444,7 @@ Be precise but do not overclaim certainty — no system can determine deception 
         # ── Call Anthropic API ─────────────────────────────────────
         payload = _json.dumps({
             "model":      "claude-sonnet-4-6",
-            "max_tokens": 600,
+            "max_tokens": 800,
             "messages":   [{"role": "user", "content": prompt}],
         }).encode()
 
