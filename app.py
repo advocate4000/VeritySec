@@ -1166,8 +1166,14 @@ def process_frame(img_bytes, audio_features=None):
 
 @app.route("/")
 def index():
+    # Manual overrides
+    if request.args.get('desktop') == '1':
+        return render_template("index.html")
+    if request.args.get('mobile') == '1':
+        return render_template("index_mobile.html")
     ua = request.headers.get('User-Agent', '').lower()
     is_mobile = any(k in ua for k in ['iphone', 'android', 'mobile', 'ipad', 'ipod'])
+    # iPadOS 13+ sends Mac-like UA — client-side JS handles redirect for those
     if is_mobile:
         return render_template("index_mobile.html")
     return render_template("index.html")
