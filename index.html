@@ -1,0 +1,2401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VERITY — Deception Analysis System</title>
+<script>
+// iPadOS 13+ sends Mac-like UA and bypasses server detection.
+// Redirect any touch device with screen width ≤ 1366px to the mobile UI,
+// unless the user explicitly requested desktop via ?desktop=1.
+(function(){
+  if(window.location.search.indexOf('desktop=1') !== -1) return;
+  var touch = navigator.maxTouchPoints > 0;
+  var narrow = Math.min(screen.width, screen.height) <= 1024;
+  if(touch && narrow) window.location.replace('/?mobile=1');
+})();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Bebas+Neue&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --black:    #080a0e;
+  --dark:     #0d1117;
+  --panel:    #111620;
+  --border:   #1e2a3a;
+  --dim:      #1c2535;
+  --text:     #8faabb;
+  --text-hi:  #c8dde8;
+  --amber:    #e8a135;
+  --amber-lo: #7a4a10;
+  --red:      #e84040;
+  --red-lo:   #5a1010;
+  --green:    #35c988;
+  --green-lo: #0f4429;
+  --cyan:     #35b4e8;
+  --cyan-lo:  #0d3a52;
+  --purple:   #b07fff;
+  --purple-lo:#2e1a52;
+  --white:    #f0f5fa;
+  --font-mono: 'Share Tech Mono', monospace;
+  --font-display: 'Bebas Neue', sans-serif;
+  --font-ui: 'Space Mono', monospace;
+  /* Global base font size — increase this to scale all rem units */
+  font-size: 16px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--black);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+body::before {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.07) 2px, rgba(0,0,0,0.07) 4px);
+  pointer-events: none; z-index: 9999;
+}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--dim); }
+::-webkit-scrollbar-thumb { background: var(--border); }
+
+/* ── Header ── */
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 28px;
+  border-bottom: 1px solid var(--border);
+  background: var(--dark);
+  position: sticky; top: 0; z-index: 100;
+}
+.logo-block { display: flex; align-items: baseline; gap: 14px; }
+.logo {
+  font-family: var(--font-display); font-size: 2.6rem;
+  letter-spacing: 0.18em; color: var(--white); line-height: 1;
+}
+.logo-sub {
+  font-size: 0.78rem; color: var(--text); letter-spacing: 0.18em;
+  border-left: 1px solid var(--border); padding-left: 14px; line-height: 1.6;
+}
+.header-right { display: flex; align-items: center; gap: 24px; }
+.status-pill {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 12px; border: 1px solid var(--border);
+  font-size: 0.8rem; letter-spacing: 0.14em;
+}
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text); animation: pulse 2s infinite; }
+.status-dot.active  { background: var(--green); }
+.status-dot.warning { background: var(--amber); animation: pulse-fast 0.8s infinite; }
+.status-dot.alert   { background: var(--red);   animation: pulse-fast 0.5s infinite; }
+@keyframes pulse      { 0%,100%{opacity:1} 50%{opacity:0.4} }
+@keyframes pulse-fast { 0%,100%{opacity:1} 50%{opacity:0.2} }
+
+/* ── Mode tabs ── */
+.mode-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--dark);
+}
+.mode-tab {
+  padding: 13px 32px; font-size: 0.78rem; letter-spacing: 0.22em;
+  text-transform: uppercase; color: var(--text); cursor: pointer;
+  border-bottom: 2px solid transparent; transition: all 0.2s;
+  display: flex; align-items: center; gap: 9px;
+}
+.mode-tab:hover { color: var(--text-hi); }
+.mode-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+.tab-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* ── Main layout ── */
+.main {
+  display: grid;
+  grid-template-columns: 1fr 400px;
+  grid-template-rows: 1fr;
+  gap: 1px;
+  height: calc(100vh - 122px);
+  background: var(--border);
+}
+.panel-view { display: none; }
+.panel-view.active { display: contents; }
+/* Explicit grid placement with full height — camera-section fills its column */
+.camera-section { grid-column: 1; grid-row: 1; height: 100%; min-height: 0; overflow: hidden; }
+.record-section { grid-column: 1; grid-row: 1; height: 100%; min-height: 0; overflow: hidden; }
+.right-panel    { grid-column: 2; grid-row: 1; height: 100%; min-height: 0; overflow: hidden; }
+.report-panel   { grid-column: 2; grid-row: 1; height: 100%; min-height: 0; overflow: hidden; }
+
+/* ── Section label ── */
+.section-label {
+  font-size: 0.75rem; letter-spacing: 0.22em; color: var(--text);
+  text-transform: uppercase; display: flex; align-items: center; gap: 9px;
+}
+.section-label::before { content:''; display:inline-block; width:14px; height:1px; background:var(--amber); }
+
+/* ══════════════════════════════════════
+   LIVE TAB — Camera section
+   ══════════════════════════════════════ */
+.camera-section {
+  background: var(--dark); display: flex; flex-direction: column;
+  padding: 20px; gap: 16px; overflow: hidden;
+}
+.camera-header { display: flex; justify-content: space-between; align-items: center; }
+
+.camera-feed-wrap {
+  position: relative; flex: 1;
+  background: #050709; border: 1px solid var(--border);
+  overflow: hidden; display: flex; align-items: center; justify-content: center;
+}
+#videoEl { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); opacity:0.92; }
+#canvasEl { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+
+.feed-overlay { position:absolute; inset:0; pointer-events:none; }
+.corner { position:absolute; width:20px; height:20px; }
+.corner.tl { top:12px; left:12px; border-top:2px solid var(--amber); border-left:2px solid var(--amber); }
+.corner.tr { top:12px; right:12px; border-top:2px solid var(--amber); border-right:2px solid var(--amber); }
+.corner.bl { bottom:12px; left:12px; border-bottom:2px solid var(--amber); border-left:2px solid var(--amber); }
+.corner.br { bottom:12px; right:12px; border-bottom:2px solid var(--amber); border-right:2px solid var(--amber); }
+.feed-label {
+  position:absolute; top:12px; left:50%; transform:translateX(-50%);
+  font-size:0.72rem; letter-spacing:0.25em; color:var(--amber);
+  padding:3px 10px; border:1px solid var(--amber-lo); background:rgba(0,0,0,0.75);
+}
+.rec-indicator {
+  position:absolute; top:14px; right:32px; display:flex; align-items:center;
+  gap:6px; font-size:0.72rem; color:var(--red); letter-spacing:0.15em;
+}
+.rec-dot { width:7px; height:7px; border-radius:50%; background:var(--red); animation:pulse-fast 1s infinite; }
+
+#noFaceOverlay {
+  position:absolute; inset:0; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; background:rgba(8,10,14,0.85);
+  font-size:0.85rem; letter-spacing:0.2em; color:var(--text); gap:12px; transition:opacity 0.3s;
+}
+#noFaceOverlay.hidden { opacity:0; pointer-events:none; }
+.no-face-icon { font-size:2.4rem; opacity:0.3; }
+
+/* Calibration bar */
+.calibration-bar {
+  margin:0; padding:9px 14px; background:rgba(232,161,53,0.08);
+  border:1px solid var(--amber-lo); font-size:0.72rem; letter-spacing:0.14em;
+  color:var(--amber); display:flex; align-items:center; gap:10px; transition:opacity 0.5s;
+}
+.calibration-bar.hidden { opacity:0; pointer-events:none; height:0; padding:0; border:none; overflow:hidden; }
+
+/* Guided calibration wizard */
+.calib-wizard {
+  display:none; flex-direction:column; gap:0;
+  border-top:1px solid var(--border); background:var(--dark);
+}
+.calib-wizard.visible { display:flex; }
+.calib-step {
+  padding:12px 16px; display:flex; align-items:center; gap:14px;
+  border-bottom:1px solid var(--border); transition:background 0.3s;
+}
+.calib-step.active { background:rgba(53,201,136,0.05); }
+.calib-step.done   { opacity:0.4; }
+.calib-icon { font-size:1.6rem; flex-shrink:0; width:36px; text-align:center; }
+.calib-body { flex:1; display:flex; flex-direction:column; gap:4px; }
+.calib-instr { font-size:0.7rem; letter-spacing:0.13em; color:var(--text-hi); }
+.calib-hint  { font-size:0.6rem; letter-spacing:0.1em; color:var(--text); opacity:0.55; }
+.calib-progress { height:3px; background:var(--dim); border-radius:0; margin-top:5px; }
+.calib-fill { height:100%; background:var(--green); border-radius:0; width:0%; transition:width 0.1s linear; }
+.calib-badge { font-size:0.6rem; letter-spacing:0.12em; padding:3px 8px; border-radius:1px; flex-shrink:0; }
+.calib-badge.waiting { background:var(--dim); color:var(--text); }
+.calib-badge.capturing { background:rgba(53,201,136,0.15); color:var(--green); }
+.calib-badge.done { background:rgba(53,201,136,0.1); color:var(--green); }
+.calib-footer { padding:10px 16px; display:flex; justify-content:space-between; align-items:center; font-size:0.65rem; letter-spacing:0.13em; color:var(--text); opacity:0.6; }
+.calib-footer button { background:none; border:none; color:var(--text); opacity:0.5; cursor:pointer; font-size:0.65rem; letter-spacing:0.13em; padding:0; }
+.calib-footer button:hover { opacity:1; }
+.cal-progress { flex:1; height:3px; background:var(--amber-lo); }
+.cal-fill { height:100%; background:var(--amber); width:0%; transition:width 0.2s; }
+
+/* Calibration quality banner — shown once after collection finishes */
+.quality-banner {
+  display:none; padding:7px 14px; font-size:0.72rem; letter-spacing:0.14em;
+  border:1px solid; align-items:center; gap:10px; animation:fadeIn 0.5s ease;
+}
+.quality-banner.good  { background:rgba(53,201,136,0.07); border-color:var(--green-lo); color:var(--green); }
+.quality-banner.warn  { background:rgba(232,161,53,0.07); border-color:var(--amber-lo); color:var(--amber); }
+.quality-banner.show  { display:flex; }
+@keyframes fadeIn { from{opacity:0} to{opacity:1} }
+
+/* Emotion strip */
+.emotion-strip { display:grid; grid-template-columns:repeat(6,1fr); gap:10px; }
+.emo-cell { display:flex; flex-direction:column; gap:5px; }
+.emo-label { font-size:0.68rem; letter-spacing:0.15em; color:var(--text); text-transform:uppercase; text-align:center; }
+.emo-bar-bg { height:5px; background:var(--dim); overflow:hidden; }
+.emo-bar-fill { height:100%; width:0%; transition:width 0.15s; }
+.emo-value { font-size:0.78rem; text-align:center; color:var(--text-hi); font-family:var(--font-ui); }
+
+/* ══════════════════════════════════════
+   LIVE TAB — Right panel
+   ══════════════════════════════════════ */
+.right-panel { background:var(--panel); display:flex; flex-direction:column; overflow:hidden; }
+
+.deception-section { padding:20px; border-bottom:1px solid var(--border); }
+.meter-title {
+  font-size:0.75rem; letter-spacing:0.22em; color:var(--text);
+  text-transform:uppercase; margin-bottom:16px; display:flex; align-items:center; gap:9px;
+}
+.meter-title::before { content:''; width:14px; height:1px; background:var(--red); }
+.deception-score-display { display:flex; align-items:baseline; gap:8px; margin-bottom:16px; }
+.score-big { font-family:var(--font-display); font-size:5rem; line-height:1; color:var(--white); transition:color 0.3s; }
+.score-pct { font-size:1.4rem; color:var(--text); font-family:var(--font-ui); }
+.score-label {
+  font-size:0.72rem; letter-spacing:0.2em; text-transform:uppercase;
+  margin-left:auto; padding:4px 10px; border:1px solid var(--border);
+  align-self:center; color:var(--text); transition:all 0.3s;
+}
+.gauge-track { height:9px; background:var(--dim); margin-bottom:9px; overflow:hidden; position:relative; }
+.gauge-fill {
+  height:100%; width:5%; transition:width 0.2s, background 0.3s;
+  background:linear-gradient(90deg,var(--green),var(--cyan)); position:relative;
+}
+.gauge-fill::after { content:''; position:absolute; right:0; top:0; bottom:0; width:3px; background:white; opacity:0.7; filter:blur(1px); }
+.gauge-ticks { display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text); opacity:0.6; }
+
+/* Timeline */
+.timeline-section { padding:14px 20px; border-bottom:1px solid var(--border); }
+.timeline-label { font-size:0.65rem; letter-spacing:0.2em; color:var(--text); text-transform:uppercase; margin-bottom:9px; opacity:0.7; }
+.timeline-track { height:30px; background:var(--dim); display:flex; align-items:stretch; gap:1px; overflow:hidden; }
+.timeline-cell { flex:1; background:var(--dim); transition:background 0.2s; min-width:3px; }
+
+/* Features */
+.features-section { padding:16px 20px; border-bottom:1px solid var(--border); }
+.features-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.feat-row { display:flex; flex-direction:column; gap:4px; }
+.feat-name { font-size:0.65rem; letter-spacing:0.1em; color:var(--text); text-transform:uppercase; }
+.feat-bar-bg { height:4px; background:var(--dim); }
+.feat-bar-fill { height:100%; background:var(--cyan); width:0%; transition:width 0.15s, background 0.3s; }
+
+/* Clues */
+.clues-section { flex:1; overflow:hidden; display:flex; flex-direction:column; }
+.clues-header { padding:14px 20px 12px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); }
+.clues-log { flex:1; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
+.clue-card { border:1px solid var(--border); padding:12px 14px; display:flex; flex-direction:column; gap:6px; animation:slideIn 0.3s ease; }
+@keyframes slideIn { from{opacity:0;transform:translateX(8px)} to{opacity:1;transform:translateX(0)} }
+.clue-card.CRITICAL { border-color:var(--red);   background:rgba(232,64,64,0.05); }
+.clue-card.HIGH     { border-color:var(--amber);  background:rgba(232,161,53,0.04); }
+.clue-card.MEDIUM   { border-color:var(--cyan);   background:rgba(53,180,232,0.04); }
+.clue-top { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+.clue-type { font-size:0.62rem; letter-spacing:0.18em; padding:3px 7px; text-transform:uppercase; font-family:var(--font-ui); }
+.clue-type.MICRO-EXPRESSION { background:var(--red-lo);    color:var(--red);    }
+.clue-type.MORPHOLOGY       { background:var(--amber-lo);  color:var(--amber);  }
+.clue-type.TIMING           { background:var(--cyan-lo);   color:var(--cyan);   }
+.clue-type.LEAKAGE          { background:var(--green-lo);  color:var(--green);  }
+.clue-type.VOICE            { background:var(--purple-lo); color:var(--purple); }
+.clue-type.CARDIAC          { background:rgba(232,75,53,0.12); color:#ff7060; }
+.clue-type.GAZE             { background:rgba(53,180,232,0.12);  color:#35b4e8; }
+.clue-type.BIOMETRIC        { background:rgba(176,127,255,0.14); color:#b07fff; }
+
+/* ── Heart rate strip ───────────────────────────────────── */
+.hr-strip {
+  background:#000; border-top:1px solid var(--border);
+  padding:7px 14px 8px; display:flex; align-items:center; gap:12px;
+  position:relative;
+}
+.hr-strip::after {          /* same scanline as VU */
+  content:''; position:absolute; inset:0; pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent,transparent 8px,rgba(0,0,0,0.18) 8px,rgba(0,0,0,0.18) 9px);
+}
+.hr-icon  { font-size:0.9rem; flex-shrink:0; line-height:1; position:relative; z-index:1; }
+.hr-bpm   {
+  font-size:1.1rem; font-family:var(--font-mono); color:var(--text-hi);
+  min-width:54px; flex-shrink:0; position:relative; z-index:1; letter-spacing:0.04em;
+}
+.hr-meta  {
+  display:flex; flex-direction:column; gap:2px; flex-shrink:0;
+  position:relative; z-index:1;
+}
+.hr-status { font-size:0.58rem; letter-spacing:0.14em; }
+.hr-qual   { font-size:0.55rem; letter-spacing:0.1em; color:var(--text); opacity:0.4; }
+.hr-spark  { flex:1; height:18px; position:relative; z-index:1; overflow:hidden; }
+.hr-spark svg { width:100%; height:100%; display:block; }
+
+/* Question timeline */
+.q-section { display:flex; flex-direction:column; gap:0; }
+.q-section-title {
+  font-size:0.62rem; letter-spacing:0.14em; color:var(--text); opacity:0.5;
+  padding:10px 16px 6px; border-bottom:1px solid var(--border);
+}
+.q-row {
+  display:flex; align-items:center; gap:10px; padding:8px 16px;
+  border-bottom:1px solid var(--border); transition:background 0.2s;
+}
+.q-row:hover { background:var(--dim); }
+.q-num {
+  font-size:0.65rem; letter-spacing:0.12em; color:var(--purple);
+  font-family:var(--font-mono); width:24px; flex-shrink:0;
+}
+.q-bar-wrap { flex:1; height:4px; background:var(--border); border-radius:0; }
+.q-bar { height:100%; border-radius:0; transition:width 0.4s; }
+.q-score { font-size:0.65rem; font-family:var(--font-mono); width:34px; text-align:right; flex-shrink:0; }
+.q-clues { font-size:0.58rem; letter-spacing:0.1em; color:var(--text); opacity:0.5; width:48px; flex-shrink:0; text-align:right; }
+.q-empty { padding:12px 16px; font-size:0.65rem; letter-spacing:0.1em; color:var(--text); opacity:0.35; }
+
+/* ── VU Meter ───────────────────────────────────────────── */
+.vu-section {
+  background:#000; border-top:1px solid var(--border);
+  padding:7px 14px 8px; display:flex; flex-direction:column; gap:5px;
+  position:relative;
+}
+/* scanline overlay for retro CRT feel */
+.vu-section::after {
+  content:''; position:absolute; inset:0; pointer-events:none;
+  background:repeating-linear-gradient(
+    0deg, transparent, transparent 8px,
+    rgba(0,0,0,0.18) 8px, rgba(0,0,0,0.18) 9px
+  );
+}
+.vu-status {
+  display:flex; align-items:center; gap:10px;
+  font-size:0.65rem; letter-spacing:0.13em; color:var(--text); margin-bottom:1px;
+  position:relative; z-index:1;
+}
+.voice-dot {
+  width:6px; height:6px; border-radius:50%;
+  background:var(--border); flex-shrink:0; transition:background 0.3s;
+}
+.voice-dot.speaking { background:var(--green); box-shadow:0 0 5px var(--green); animation:pulse 1.1s infinite; }
+.vu-row { display:flex; align-items:center; gap:9px; position:relative; z-index:1; }
+.vu-tag {
+  font-size:0.56rem; letter-spacing:0.14em; color:var(--text);
+  opacity:0.50; width:36px; flex-shrink:0; font-family:var(--font-ui);
+}
+.vu-bar { display:flex; gap:3px; flex:1; }
+.vu-seg {
+  flex:1; height:5px; border-radius:0;
+  background:#030803;
+  transition:background 30ms;
+}
+.vu-seg.on-g { background:#00ff55; box-shadow:0 0 2px 1px #00ff55, 0 0 6px #00cc44; }
+.vu-seg.on-y { background:#ffcc00; box-shadow:0 0 2px 1px #ffcc00, 0 0 6px #cc9900; }
+.vu-seg.on-r { background:#ff2200; box-shadow:0 0 3px 1px #ff3300, 0 0 8px #cc1100; }
+.vu-seg.ghost   { background:#060e06; }
+.vu-seg.ghost-y { background:#0e0b00; }
+.vu-seg.ghost-r { background:#0e0200; }
+.clue-label { font-size:0.78rem; color:var(--text-hi); font-family:var(--font-ui); font-weight:700; }
+.clue-detail { font-size:0.72rem; color:var(--text); line-height:1.6; }
+.no-clues { display:flex; align-items:center; justify-content:center; flex:1; font-size:0.78rem; letter-spacing:0.15em; color:var(--text); opacity:0.4; flex-direction:column; gap:10px; }
+.severity-badge { font-size:0.58rem; letter-spacing:0.15em; padding:2px 6px; border-radius:1px; margin-left:auto; flex-shrink:0; }
+.severity-badge.CRITICAL { background:var(--red-lo);  color:var(--red); }
+.severity-badge.HIGH     { background:var(--amber-lo); color:var(--amber); }
+.severity-badge.MEDIUM   { background:var(--cyan-lo);  color:var(--cyan); }
+
+/* AI Analysis panel (trigger strip only) */
+.ai-panel { border-top:1px solid var(--border); display:flex; flex-direction:column; }
+.ai-btn {
+  padding:4px 12px; border:1px solid var(--cyan); background:transparent;
+  color:var(--cyan); font-family:var(--font-mono); font-size:0.65rem;
+  letter-spacing:0.16em; cursor:pointer; transition:opacity 0.2s;
+}
+.ai-btn:hover:not(:disabled) { background:rgba(53,185,220,0.08); }
+.ai-btn:disabled { opacity:0.3; cursor:not-allowed; border-color:var(--border); color:var(--text); }
+.ai-btn.loading  { border-color:var(--amber); color:var(--amber); animation:pulse 1.2s infinite; }
+.ai-body { padding:9px 16px; font-size:0.68rem; color:var(--text); }
+.ai-placeholder { opacity:0.4; font-size:0.68rem; letter-spacing:0.1em; }
+
+/* ── Full-screen forensic report modal ─────────────────── */
+.report-modal {
+  position:fixed; inset:0; z-index:9999;
+  background:rgba(0,0,0,0.94); backdrop-filter:blur(4px);
+  display:none; flex-direction:column; overflow-y:auto;
+}
+.report-modal.open { display:flex; }
+.report-inner {
+  max-width:760px; width:100%; margin:auto; padding:28px 20px 48px;
+  display:flex; flex-direction:column; gap:0;
+}
+.rpt-header {
+  display:flex; justify-content:space-between; align-items:flex-start;
+  padding-bottom:14px; border-bottom:1px solid var(--border); margin-bottom:18px;
+}
+.rpt-title-block { display:flex; flex-direction:column; gap:4px; }
+.rpt-title { font-size:0.85rem; letter-spacing:0.22em; color:var(--text-hi); }
+.rpt-subtitle { font-size:0.6rem; letter-spacing:0.14em; color:var(--text); opacity:0.45; }
+.rpt-close {
+  background:none; border:1px solid var(--border); color:var(--text);
+  padding:5px 14px; font-size:0.62rem; letter-spacing:0.14em;
+  cursor:pointer; border-radius:1px; font-family:var(--font-ui);
+}
+.rpt-close:hover { border-color:var(--red); color:var(--red); }
+.rpt-verdict {
+  display:flex; align-items:center; gap:18px; padding:18px 20px;
+  border:1px solid; border-radius:1px; margin-bottom:14px;
+}
+.rpt-verdict.truthful     { background:rgba(53,201,136,0.07); border-color:var(--green); }
+.rpt-verdict.inconclusive { background:rgba(232,161,53,0.07); border-color:var(--amber); }
+.rpt-verdict.deception    { background:rgba(232,75,53,0.09);  border-color:var(--red);   }
+.rpt-verdict-label { font-size:1.05rem; letter-spacing:0.22em; font-weight:700; }
+.rpt-verdict.truthful     .rpt-verdict-label { color:var(--green); }
+.rpt-verdict.inconclusive .rpt-verdict-label { color:var(--amber); }
+.rpt-verdict.deception    .rpt-verdict-label { color:var(--red);   }
+.rpt-confidence { font-size:0.6rem; letter-spacing:0.15em; opacity:0.55; color:var(--text); }
+.rpt-metrics {
+  display:grid; grid-template-columns:repeat(5,1fr); gap:1px;
+  background:var(--border); border:1px solid var(--border); margin-bottom:14px;
+}
+.rpt-metric { background:var(--dark); padding:10px 12px; display:flex; flex-direction:column; gap:4px; }
+.rpt-metric-key { font-size:0.54rem; letter-spacing:0.15em; color:var(--text); opacity:0.45; }
+.rpt-metric-val { font-size:0.82rem; font-family:var(--font-mono); color:var(--text-hi); }
+.rpt-block { border:1px solid var(--border); margin-bottom:12px; }
+.rpt-block-title {
+  font-size:0.58rem; letter-spacing:0.18em; color:var(--text); opacity:0.5;
+  padding:7px 14px; border-bottom:1px solid var(--border); background:var(--dim);
+}
+.rpt-block-body { padding:16px; }
+.rpt-narrative { font-size:0.83rem; line-height:1.80; color:var(--text-hi); }
+.rpt-findings { display:flex; flex-direction:column; gap:8px; }
+.rpt-finding { display:flex; gap:10px; font-size:0.77rem; line-height:1.55; color:var(--text); }
+.rpt-finding::before { content:'→'; color:var(--amber); flex-shrink:0; margin-top:1px; }
+.rpt-voice    { font-size:0.77rem; line-height:1.65; color:var(--text); }
+.rpt-examiner { font-size:0.77rem; line-height:1.65; color:var(--cyan); font-style:italic; }
+.rpt-footer {
+  font-size:0.57rem; letter-spacing:0.1em; color:var(--text); opacity:0.28;
+  padding-top:14px; border-top:1px solid var(--border); margin-top:4px; line-height:1.7;
+}
+@media (max-width:600px) {
+  .rpt-metrics { grid-template-columns:repeat(3,1fr); }
+  .rpt-verdict-label { font-size:0.85rem; }
+}
+
+/* Meta + controls */
+.meta-bar { display:flex; gap:20px; padding:0 20px 12px; font-size:0.68rem; color:var(--text); letter-spacing:0.12em; flex-wrap:wrap; }
+.meta-item { display:flex; gap:7px; }
+.meta-key { opacity:0.5; }
+.meta-val { color:var(--text-hi); font-family:var(--font-ui); }
+
+.controls { padding:14px 20px; border-top:1px solid var(--border); display:flex; gap:10px; }
+.btn {
+  flex:1; padding:11px 0; border:1px solid var(--border); background:transparent;
+  color:var(--text); font-family:var(--font-mono); font-size:0.75rem;
+  letter-spacing:0.2em; text-transform:uppercase; cursor:pointer; transition:all 0.2s;
+}
+.btn:hover { border-color:var(--amber); color:var(--amber); background:rgba(232,161,53,0.05); }
+.btn.primary { border-color:var(--cyan);  color:var(--cyan);  }
+.btn.primary:hover { background:rgba(53,180,232,0.08); }
+.btn.danger  { border-color:var(--red);   color:var(--red);   }
+.btn.danger:hover  { background:rgba(232,64,64,0.08); }
+.btn.success { border-color:var(--green); color:var(--green); }
+.btn.success:hover { background:rgba(53,201,136,0.08); }
+.btn:disabled { opacity:0.3; cursor:not-allowed; }
+
+/* ══════════════════════════════════════
+   RECORD & ANALYSE TAB
+   ══════════════════════════════════════ */
+.record-section {
+  background: var(--dark); display:flex; flex-direction:column;
+  padding: 20px; gap: 16px; overflow: hidden;
+}
+.record-feed-wrap {
+  position:relative; flex:1;
+  background:#050709; border:1px solid var(--border);
+  overflow:hidden; display:flex; align-items:center; justify-content:center;
+}
+#recVideoEl    { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); opacity:0.88; }
+#recPlaybackEl { width:100%; height:100%; object-fit:cover; display:none; background:#000; transform:scaleX(-1); }
+
+.rec-timer {
+  position:absolute; top:14px; left:50%; transform:translateX(-50%);
+  font-family:var(--font-display); font-size:2rem; letter-spacing:0.15em;
+  color:var(--red); text-shadow:0 0 20px rgba(232,64,64,0.5); display:none;
+}
+.rec-timer.active { display:block; }
+.rec-status-badge {
+  position:absolute; top:14px; right:16px; font-size:0.72rem;
+  letter-spacing:0.18em; padding:4px 10px; border:1px solid var(--border);
+  background:rgba(0,0,0,0.75); color:var(--text);
+}
+.rec-controls { display:flex; gap:10px; align-items:center; }
+
+/* Upload zone */
+.upload-zone {
+  border:1px dashed var(--border); padding:18px;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:8px; cursor:pointer; transition:all 0.2s;
+  font-size:0.75rem; letter-spacing:0.15em; color:var(--text); text-align:center;
+}
+.upload-zone:hover { border-color:var(--cyan); color:var(--cyan); background:rgba(53,180,232,0.03); }
+.upload-zone.has-file { border-color:var(--green); color:var(--green); background:rgba(53,201,136,0.04); }
+#fileInput { display:none; }
+.upload-icon { font-size:1.5rem; opacity:0.4; }
+
+/* Analysis progress */
+.analysis-progress { display:none; flex-direction:column; gap:10px; padding:16px; border:1px solid var(--border); background:var(--panel); }
+.analysis-progress.active { display:flex; }
+.prog-label { font-size:0.75rem; letter-spacing:0.2em; color:var(--amber); }
+.prog-bar-bg { height:5px; background:var(--dim); }
+.prog-bar-fill { height:100%; background:var(--amber); width:0%; transition:width 0.3s; }
+.prog-detail { font-size:0.68rem; letter-spacing:0.12em; color:var(--text); opacity:0.7; }
+
+/* ══════════════════════════════════════
+   REPORT PANEL
+   ══════════════════════════════════════ */
+.report-panel { background:var(--panel); display:flex; flex-direction:column; overflow:hidden; }
+
+.empty-report {
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  flex:1; gap:14px; font-size:0.78rem; letter-spacing:0.18em;
+  color:var(--text); opacity:0.4; padding:40px; text-align:center;
+}
+.empty-report-icon { font-size:3rem; opacity:0.3; }
+
+#reportContent { display:none; flex:1; overflow:hidden; flex-direction:column; }
+
+.report-verdict { padding:20px; border-bottom:1px solid var(--border); }
+.verdict-display { display:flex; align-items:center; gap:12px; margin-bottom:16px; }
+.verdict-score { font-family:var(--font-display); font-size:4.5rem; line-height:1; color:var(--white); }
+.verdict-right { display:flex; flex-direction:column; gap:7px; }
+.verdict-tag { font-size:0.78rem; letter-spacing:0.2em; text-transform:uppercase; padding:5px 12px; border:1px solid var(--border); color:var(--text); }
+.verdict-sub { font-size:0.65rem; letter-spacing:0.12em; color:var(--text); opacity:0.6; }
+
+.report-stats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.stat-cell { display:flex; flex-direction:column; gap:3px; padding:9px 10px; background:var(--dim); border:1px solid var(--border); }
+.stat-key { font-size:0.6rem; letter-spacing:0.18em; color:var(--text); text-transform:uppercase; opacity:0.6; }
+.stat-val { font-size:1rem; color:var(--text-hi); font-family:var(--font-ui); font-weight:700; }
+
+.report-chart-section { padding:14px 20px; border-bottom:1px solid var(--border); }
+#reportChart { width:100%; height:68px; display:block; }
+
+.key-moments-section { padding:14px 20px; border-bottom:1px solid var(--border); }
+.moments-scroll { display:flex; gap:9px; overflow-x:auto; padding-bottom:4px; }
+.moment-card { flex-shrink:0; width:104px; border:1px solid var(--border); cursor:pointer; transition:border-color 0.2s; }
+.moment-card:hover { border-color:var(--amber); }
+.moment-card.CRITICAL { border-color:var(--red); }
+.moment-card.HIGH     { border-color:var(--amber); }
+.moment-thumb { width:104px; height:78px; object-fit:cover; display:block; background:var(--dim); }
+.moment-meta { padding:5px 7px; }
+.moment-time  { font-size:0.6rem; letter-spacing:0.1em; color:var(--amber); margin-bottom:2px; }
+.moment-score { font-size:0.65rem; letter-spacing:0.1em; color:var(--red); font-weight:700; }
+.moment-clues { font-size:0.55rem; opacity:0.5; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+.clue-freq-section { flex:1; overflow-y:auto; padding:14px 20px; }
+.freq-row { display:flex; align-items:center; gap:9px; margin-bottom:9px; }
+.freq-label { font-size:0.68rem; letter-spacing:0.1em; color:var(--text); flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.freq-bar-bg { width:64px; height:5px; background:var(--dim); flex-shrink:0; }
+.freq-bar-fill { height:100%; background:var(--red); }
+.freq-count { font-size:0.68rem; color:var(--amber); font-family:var(--font-ui); width:24px; text-align:right; flex-shrink:0; }
+
+/* Gaze strip */
+.gaze-strip {
+  background:#000; border-top:1px solid var(--border);
+  padding:6px 14px; display:flex; align-items:center; gap:12px; flex-shrink:0;
+  font-size:0.62rem; letter-spacing:0.12em; position:relative;
+}
+.gaze-strip::after { content:''; position:absolute; inset:0; pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent,transparent 8px,rgba(0,0,0,0.18) 8px,rgba(0,0,0,0.18) 9px); }
+.gaze-label { color:var(--text); opacity:0.5; width:38px; flex-shrink:0; position:relative; z-index:1; font-size:0.54rem; }
+.gaze-track { flex:1; height:5px; background:var(--dim); position:relative; z-index:1; }
+.gaze-needle { width:3px; height:9px; background:var(--cyan); position:absolute; top:-2px; left:50%; transition:left 0.1s; }
+.gaze-val   { min-width:36px; text-align:right; color:var(--text-hi); font-family:var(--font-ui); position:relative; z-index:1; }
+.resp-strip {
+  background:#000; border-top:1px solid var(--border);
+  padding:5px 14px; display:flex; align-items:center; gap:12px; flex-shrink:0;
+  font-size:0.62rem; letter-spacing:0.12em;
+}
+.resp-val { color:var(--text-hi); font-family:var(--font-ui); min-width:60px; }
+.resp-status { font-size:0.56rem; letter-spacing:0.12em; }
+
+@media (max-width: 900px) {
+  .main { grid-template-columns:1fr; grid-template-rows:55vh auto; }
+  .right-panel, .report-panel { overflow-y:auto; max-height:60vh; }
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <div class="logo-block">
+    <div class="logo">VERITY</div>
+    <div class="logo-sub">Facial Deception Analysis System</div>
+  </div>
+  <div class="header-right">
+    <div class="status-pill">
+      <div class="status-dot" id="sysStatus"></div>
+      <span id="sysLabel">OFFLINE</span>
+    </div>
+
+  </div>
+</header>
+
+<!-- Mode tabs -->
+<div class="mode-tabs">
+  <div class="mode-tab active" id="tabLive"   onclick="switchTab('live')">  <div class="tab-dot"></div>LIVE ANALYSIS</div>
+  <div class="mode-tab"        id="tabRecord" onclick="switchTab('record')"><div class="tab-dot"></div>RECORD &amp; ANALYSE</div>
+</div>
+
+<div class="main">
+
+  <!-- ══════════ LIVE TAB ══════════ -->
+  <div class="panel-view active" id="viewLive">
+
+    <div class="camera-section">
+      <div class="camera-header">
+        <div class="section-label">Live Feed — Subject Analysis</div>
+        <div id="frameCounter" style="font-size:0.72rem;letter-spacing:0.14em;color:var(--text)">FRAME 0000</div>
+      </div>
+      <div class="camera-feed-wrap">
+        <video id="videoEl" autoplay muted playsinline></video>
+        <canvas id="canvasEl"></canvas>
+        <div class="feed-overlay">
+          <div class="corner tl"></div><div class="corner tr"></div>
+          <div class="corner bl"></div><div class="corner br"></div>
+          <div class="feed-label">CAM-01 · LIVE</div>
+          <div class="rec-indicator"><div class="rec-dot"></div>REC</div>
+        </div>
+        <div id="noFaceOverlay">
+          <div class="no-face-icon">⬜</div>
+          <span>NO SUBJECT DETECTED</span>
+          <span style="opacity:0.5;font-size:0.72rem">Position face within frame</span>
+        </div>
+      </div>
+      <div class="calibration-bar" id="calBar">
+        <span id="calPhaseLabel">RELAX FACE  ·  HOLD NEUTRAL  ·  THEN SET BASELINE</span>
+        <div class="cal-progress"><div class="cal-fill" id="calFill" style="width:0%"></div></div>
+        <span id="calPct" style="white-space:nowrap">NOT SET</span>
+      </div>
+
+      <!-- Guided calibration wizard — shown after baseline is set -->
+      <div class="calib-wizard" id="calibWizard">
+        <div class="calib-step" id="cs-eyebrows">
+          <div class="calib-icon">🤨</div>
+          <div class="calib-body">
+            <div class="calib-instr">RAISE EYEBROWS + OPEN EYES WIDE</div>
+            <div class="calib-hint">Hold for 3 seconds — captures surprise & fear range</div>
+            <div class="calib-progress"><div class="calib-fill" id="cf-eyebrows"></div></div>
+          </div>
+          <div class="calib-badge waiting" id="cb-eyebrows">WAITING</div>
+        </div>
+        <div class="calib-step" id="cs-smile">
+          <div class="calib-icon">😄</div>
+          <div class="calib-body">
+            <div class="calib-instr">SMILE AS BROADLY AS POSSIBLE</div>
+            <div class="calib-hint">Hold for 3 seconds — captures happiness range</div>
+            <div class="calib-progress"><div class="calib-fill" id="cf-smile"></div></div>
+          </div>
+          <div class="calib-badge waiting" id="cb-smile">WAITING</div>
+        </div>
+        <div class="calib-step" id="cs-anger">
+          <div class="calib-icon">😠</div>
+          <div class="calib-body">
+            <div class="calib-instr">FURROW BROWS + FROWN HARD</div>
+            <div class="calib-hint">Hold for 3 seconds — captures anger, sadness & disgust range</div>
+            <div class="calib-progress"><div class="calib-fill" id="cf-anger"></div></div>
+          </div>
+          <div class="calib-badge waiting" id="cb-anger">WAITING</div>
+        </div>
+        <div class="calib-footer">
+          <span id="calibStatus">GUIDED CALIBRATION — IMPROVES ACCURACY FOR YOUR FACE</span>
+          <button onclick="skipCalibration()">SKIP ✕</button>
+        </div>
+      </div>
+      <div class="quality-banner" id="qualBanner">
+        <span id="qualIcon">◉</span>
+        <span id="qualText">BASELINE READY</span>
+      </div>
+      <div class="emotion-strip" id="emotionStrip"></div>
+      <div class="vu-section" id="voiceBar">
+        <div class="vu-status">
+          <div class="voice-dot" id="voiceDot"></div>
+          <span id="voiceLabel">MIC OFF</span>
+          <span id="voicePitch" style="color:var(--green);font-family:var(--font-mono);margin-left:4px"></span>
+        </div>
+        <div class="vu-row">
+          <span class="vu-tag">LEVEL</span>
+          <div class="vu-bar" id="vuLevel"></div>
+        </div>
+        <div class="vu-row">
+          <span class="vu-tag">VOICE</span>
+          <div class="vu-bar" id="vuVoice"></div>
+        </div>
+      </div>
+
+      <!-- Heart rate strip (rPPG) -->
+      <div class="hr-strip" id="hrStrip">
+        <div class="hr-icon" id="hrIcon">♡</div>
+        <div class="hr-bpm"  id="hrBpm">— BPM</div>
+        <div class="hr-meta">
+          <div class="hr-status" id="hrStatus">CALIBRATING</div>
+          <div class="hr-qual"   id="hrQual">SIGNAL: —</div>
+        </div>
+        <div class="hr-spark" id="hrSpark"></div>
+      </div>
+
+      <!-- Gaze tracking strip -->
+      <div class="gaze-strip" id="gazeStrip">
+        <span class="gaze-label">GAZE</span>
+        <div class="gaze-track"><div class="gaze-needle" id="gazeNeedle"></div></div>
+        <span class="gaze-val" id="gazeVal">CENTER</span>
+        <span style="color:var(--text);opacity:0.4;font-size:0.54rem;position:relative;z-index:1">BLINK <span id="blinkRate" style="color:var(--text-hi)">—</span>/min</span>
+      </div>
+
+      <!-- Respiration strip -->
+      <div class="resp-strip" id="respStrip">
+        <span class="gaze-label">RESP</span>
+        <span class="resp-val" id="respVal">— BPM</span>
+        <span class="resp-status" id="respStatus" style="color:var(--text);opacity:0.5">CALIBRATING</span>
+      </div>
+    </div>
+
+    <div class="right-panel">
+      <div class="deception-section">
+        <div class="meter-title">Deception Index</div>
+        <div class="deception-score-display">
+          <div class="score-big" id="scoreDisplay">0</div>
+          <div class="score-pct">%</div>
+          <div class="score-label" id="verdictLabel">AWAITING DATA</div>
+        </div>
+        <div class="gauge-track"><div class="gauge-fill" id="gaugeFill"></div></div>
+        <div class="gauge-ticks"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+      </div>
+
+      <div class="timeline-section">
+        <div class="timeline-label">Deception History (90 frames)</div>
+        <div class="timeline-track" id="timelineTrack"></div>
+      </div>
+
+      <div class="features-section">
+        <div class="section-label" style="margin-bottom:13px">Facial Region Activity</div>
+        <div class="features-grid" id="featureGrid"></div>
+      </div>
+
+      <div class="clues-section">
+        <div class="clues-header">
+          <div class="section-label">Deception Clues</div>
+          <div id="clueCount" style="font-size:0.72rem;color:var(--text);letter-spacing:0.12em">0 ACTIVE</div>
+        </div>
+        <div class="clues-log" id="cluesLog">
+          <div class="no-clues"><span>⬡</span><span>NO DECEPTION INDICATORS</span></div>
+        </div>
+      </div>
+
+      <!-- Question timeline -->
+      <div class="q-section" id="qSection" style="border-top:1px solid var(--border)">
+        <div class="q-section-title">QUESTION SEGMENTS — press ◈ MARK QUESTION before each</div>
+        <div id="qList"><div class="q-empty">No questions marked yet</div></div>
+      </div>
+
+      <!-- AI Analysis panel — opens full-screen modal report -->
+      <div class="ai-panel" id="aiPanel">
+        <div class="clues-header">
+          <div class="section-label">◎ AI FORENSIC REPORT</div>
+          <button class="ai-btn" id="aiBtn" onclick="requestAIAnalysis()" disabled>GENERATE</button>
+        </div>
+        <div class="ai-body" id="aiBody">
+          <div class="ai-placeholder">Collect 10+ seconds of data, then generate a Claude-powered forensic report.</div>
+        </div>
+      </div>
+
+      <div class="meta-bar">
+        <div class="meta-item"><span class="meta-key">ELAPSED</span><span class="meta-val" id="metaElapsed">0.0s</span></div>
+        <div class="meta-item"><span class="meta-key">DOMINANT</span><span class="meta-val" id="metaDominant">—</span></div>
+        <div class="meta-item"><span class="meta-key">CONF</span><span class="meta-val" id="metaConf">—</span></div>
+      </div>
+      <div class="controls">
+        <button class="btn" onclick="resetSession()">↺ RESET</button>
+        <button class="btn success" id="baselineBtn" onclick="captureBaseline()" disabled>◎ SET BASELINE</button>
+        <button class="btn" id="calibBtn" onclick="runCalibrationWizard()" disabled style="color:var(--green);border-color:var(--green-lo)">◈ GUIDED CAL</button>
+        <button class="btn" id="markQBtn" onclick="markQuestion()" disabled style="color:var(--purple);border-color:var(--purple-lo)">◈ MARK Q</button>
+        <button class="btn primary" id="startBtn" onclick="toggleCamera()">▶ START CAMERA</button>
+      </div>
+    </div>
+
+  </div><!-- /viewLive -->
+
+  <!-- ══════════ RECORD TAB ══════════ -->
+  <div class="panel-view" id="viewRecord">
+
+    <div class="record-section">
+      <div class="camera-header">
+        <div class="section-label">Record Subject for Analysis</div>
+        <div id="recFrameInfo" style="font-size:0.72rem;letter-spacing:0.12em;color:var(--text)"></div>
+      </div>
+
+      <div class="record-feed-wrap">
+        <video id="recVideoEl" autoplay muted playsinline></video>
+        <video id="recPlaybackEl" controls></video>
+        <div class="feed-overlay">
+          <div class="corner tl"></div><div class="corner tr"></div>
+          <div class="corner bl"></div><div class="corner br"></div>
+        </div>
+        <div class="rec-timer" id="recTimer">00:00</div>
+        <div class="rec-status-badge" id="recStatusBadge">INITIALISING...</div>
+      </div>
+
+      <div class="vu-section" id="recVoiceBar">
+        <div class="vu-status">
+          <div class="voice-dot" id="recVoiceDot"></div>
+          <span id="recVoiceLabel">MIC OFF</span>
+          <span id="recVoicePitch" style="color:var(--green);font-family:var(--font-mono);margin-left:4px"></span>
+        </div>
+        <div class="vu-row">
+          <span class="vu-tag">LEVEL</span>
+          <div class="vu-bar" id="vuLevelRec"></div>
+        </div>
+        <div class="vu-row">
+          <span class="vu-tag">VOICE</span>
+          <div class="vu-bar" id="vuVoiceRec"></div>
+        </div>
+      </div>
+
+      <div class="analysis-progress" id="analysisProgress">
+        <div class="prog-label">◎ ANALYSING VIDEO — PLEASE WAIT</div>
+        <div class="prog-bar-bg"><div class="prog-bar-fill" id="progFill"></div></div>
+        <div class="prog-detail" id="progDetail">Uploading to analysis engine...</div>
+      </div>
+
+      <div class="rec-controls">
+        <button class="btn primary" id="recStartBtn" onclick="startRecording()">⏺ START REC</button>
+        <button class="btn danger"  id="recStopBtn"  onclick="stopRecording()"  disabled>⏹ STOP</button>
+        <button class="btn success" id="recAnalyseBtn" onclick="analyseRecording()" disabled>▶ ANALYSE</button>
+        <button class="btn" id="recClearBtn" onclick="clearRecording()" style="flex:0;padding:11px 16px" disabled>✕</button>
+      </div>
+      <div class="controls" style="padding:0 0 4px">
+        <button class="btn success" id="recBaselineBtn" onclick="captureBaseline()" disabled style="flex:1">◎ SET BASELINE (HOLD NEUTRAL FIRST)</button>
+      </div>
+
+      <div class="upload-zone" id="uploadZone" onclick="document.getElementById('fileInput').click()">
+        <div class="upload-icon">↑</div>
+        <span>OR UPLOAD A VIDEO FILE</span>
+        <span style="opacity:0.5;font-size:0.65rem">MP4 · MOV · WEBM — max 200 MB</span>
+        <span id="uploadFileName" style="color:var(--green);display:none;font-size:0.72rem"></span>
+      </div>
+      <input type="file" id="fileInput" accept="video/*" onchange="handleFileUpload(event)">
+
+      <div id="recSizeInfo" style="font-size:0.65rem;letter-spacing:0.12em;color:var(--text);opacity:0.5"></div>
+    </div>
+
+    <!-- Report panel -->
+    <div class="report-panel">
+      <div class="empty-report" id="emptyReport">
+        <div class="empty-report-icon">◎</div>
+        <span>RECORD OR UPLOAD A VIDEO</span>
+        <span style="opacity:0.5;font-size:0.65rem">Analysis report will appear here</span>
+      </div>
+
+      <div id="reportContent">
+        <div class="report-verdict">
+          <div class="verdict-display">
+            <div class="verdict-score" id="rScore">0</div>
+            <div style="font-family:var(--font-display);font-size:1.4rem;color:var(--text);margin-bottom:4px">%</div>
+            <div class="verdict-right">
+              <div class="verdict-tag" id="rVerdict">—</div>
+              <div class="verdict-sub" id="rDuration">—</div>
+            </div>
+          </div>
+          <div class="report-stats" id="reportStats"></div>
+        </div>
+
+        <div class="report-chart-section">
+          <div class="timeline-label" style="margin-bottom:9px">Deception Score Over Time</div>
+          <canvas id="reportChart"></canvas>
+        </div>
+
+        <div class="key-moments-section">
+          <div class="timeline-label" style="margin-bottom:10px">Key Moments — Click to Seek</div>
+          <div class="moments-scroll" id="momentsScroll">
+            <div style="font-size:0.68rem;color:var(--text);opacity:0.4;letter-spacing:0.12em">No flagged moments</div>
+          </div>
+        </div>
+
+        <div class="clue-freq-section">
+          <div class="timeline-label" style="margin-bottom:10px">Most Frequent Deception Clues</div>
+          <div id="clueFreqList"></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /viewRecord -->
+
+</div><!-- /main -->
+
+<script>
+// ═══════════════════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════════════════
+const EMOTIONS = ['happiness','surprise','fear','anger','disgust','sadness'];
+const EMO_COLORS = {
+  happiness:'#35c988', surprise:'#35b4e8', fear:'#9b59b6',
+  anger:'#e84040', disgust:'#e8a135', sadness:'#5ba3d9'
+};
+const FEATURES_DISPLAY = {
+  inner_brow_raise:'Inner Brow Raise', outer_brow_raise:'Outer Brow Raise',
+  brow_gap:'Brow Convergence',         eye_aperture:'Eye Aperture',
+  lower_lid_tension:'Lower Lid Tension', cheek_raise:'Cheek Elevation',
+  mouth_width:'Mouth Width',           mouth_open:'Mouth Aperture',
+  lip_corner_dir:'Lip Corner Dir',     upper_lip_raise:'Upper Lip Raise',
+  lip_press:'Lip Press',               nose_wrinkle:'Nose Wrinkle',
+};
+
+// ── Session ID — persists across page reloads; unique per tab ──
+const SESSION_ID = (() => {
+  const key = 'verity_session_id';
+  let sid = sessionStorage.getItem(key);   // sessionStorage = per-tab, per-session
+  if (!sid) { sid = crypto.randomUUID(); sessionStorage.setItem(key, sid); }
+  return sid;
+})();
+
+// ═══════════════════════════════════════════════════
+// State
+// ═══════════════════════════════════════════════════
+const liveState = { running:false, frameCount:0, deceptionHistory:[], sessionLog:[], analysisInterval:null };
+const recState  = { mediaRecorder:null, chunks:[], blob:null, uploadFile:null, timerInterval:null, seconds:0 };
+let recStream   = null;
+
+// ═══════════════════════════════════════════════════
+// Tab switching
+// ═══════════════════════════════════════════════════
+function switchTab(tab) {
+  document.getElementById('tabLive').classList.toggle('active', tab==='live');
+  document.getElementById('tabRecord').classList.toggle('active', tab==='record');
+  document.querySelectorAll('.panel-view').forEach(v => v.classList.remove('active'));
+  document.getElementById(tab==='live' ? 'viewLive' : 'viewRecord').classList.add('active');
+  if (tab === 'record') {
+    startRecordCameraPreview();
+    if (!micActive) startMic();   // start mic for record-tab meters
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// Build live-tab UI components
+// ═══════════════════════════════════════════════════
+function initUI() {
+  // Emotion bars
+  const strip = document.getElementById('emotionStrip');
+  EMOTIONS.forEach(e => {
+    strip.innerHTML += `<div class="emo-cell">
+      <div class="emo-label">${e}</div>
+      <div class="emo-bar-bg"><div class="emo-bar-fill" id="emoBar-${e}" style="background:${EMO_COLORS[e]}"></div></div>
+      <div class="emo-value" id="emoVal-${e}">0.00</div></div>`;
+  });
+  // Feature bars
+  const grid = document.getElementById('featureGrid');
+  Object.entries(FEATURES_DISPLAY).forEach(([k,label]) => {
+    grid.innerHTML += `<div class="feat-row">
+      <div class="feat-name">${label}</div>
+      <div class="feat-bar-bg"><div class="feat-bar-fill" id="feat-${k}"></div></div></div>`;
+  });
+  // Timeline cells
+  const track = document.getElementById('timelineTrack');
+  for (let i=0;i<90;i++) track.innerHTML += `<div class="timeline-cell" id="tc-${i}"></div>`;
+}
+
+// ═══════════════════════════════════════════════════
+// LIVE ANALYSIS
+// ═══════════════════════════════════════════════════
+const video  = document.getElementById('videoEl');
+const canvas = document.getElementById('canvasEl');
+const ctx    = canvas.getContext('2d');
+
+async function toggleCamera() {
+  liveState.running ? stopCamera() : await startCamera();
+}
+
+async function startCamera() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'}});
+    video.srcObject = stream;
+    await video.play();
+
+    // Health check: warn but never block analysis from starting.
+    // The camera video plays *before* this point — if we returned here
+    // on failure the user would see the camera feed with a frozen UI.
+    try {
+      const health = await fetch('/health').then(r => r.json());
+      if (!health || health.status !== 'ok') {
+        setStatus('warning', 'BACKEND WARMING UP');
+      }
+    } catch(e) {
+      setStatus('warning', 'BACKEND UNREACHABLE');
+      console.warn('Health check failed:', e);
+      // Fall through — analysis loop may still work once backend is ready
+    }
+
+    liveState.running = true;
+    document.getElementById('startBtn').textContent = '⏹ STOP';
+    document.getElementById('baselineBtn').disabled = false;
+    document.getElementById('calibBtn').disabled    = false;
+    document.getElementById('markQBtn').disabled    = false;
+    startMic();
+    initSpeechRecognition(); startSpeechRec();
+    if (liveState.running) setStatus('active', 'ACTIVE');
+    liveState.analysisInterval = setInterval(captureAndAnalyse, 120);
+  } catch(e) { alert('Camera access denied: ' + e.message); }
+}
+
+function stopCamera() {
+  liveState.running = false;
+  clearInterval(liveState.analysisInterval);
+  if (video.srcObject) video.srcObject.getTracks().forEach(t=>t.stop());
+  video.srcObject = null;
+  stopMic(); stopSpeechRec();
+  document.getElementById('startBtn').textContent = '▶ START CAMERA';
+  document.getElementById('baselineBtn').disabled = true;
+  document.getElementById('calibBtn').disabled    = true;
+  document.getElementById('markQBtn').disabled    = true;
+  setStatus('', 'OFFLINE');
+}
+
+function setStatus(cls, label) {
+  document.getElementById('sysStatus').className = 'status-dot ' + cls;
+  document.getElementById('sysLabel').textContent = label;
+}
+
+// ── Audio capture & pitch estimation ──────────────────────────────────────────
+let audioCtx  = null;
+let analyser  = null;
+let micActive = false;
+
+// Extended audio state — maintained across frames
+let recentPitches   = [];   // last 10 voiced pitches → jitter
+let rmsFrameHistory = [];   // last 15 frames of {rms,speaking,t} → syllable rate
+let pauseStartTime  = null; // when current silence began
+let lastSpeakingState = false;
+let sessionSpeechMs = 0;
+let sessionPauses   = [];   // completed pause durations (ms)
+
+function updatePauseTracking(speaking) {
+  const now = Date.now();
+  if (lastSpeakingState !== speaking) {
+    if (!speaking) {
+      pauseStartTime = now;
+    } else if (pauseStartTime) {
+      const dur = now - pauseStartTime;
+      if (dur > 150) sessionPauses.push(dur);  // ignore sub-150ms noise
+      pauseStartTime = null;
+    }
+    lastSpeakingState = speaking;
+  }
+  if (speaking) sessionSpeechMs += 120;
+  return (!speaking && pauseStartTime) ? (now - pauseStartTime) : 0;
+}
+
+function computeJitter(pitch) {
+  if (pitch > 60) {
+    recentPitches.push(pitch);
+    if (recentPitches.length > 10) recentPitches.shift();
+  }
+  if (recentPitches.length < 4) return 0;
+  const sr = audioCtx ? audioCtx.sampleRate : 44100;
+  const periods = recentPitches.map(p => sr / p);
+  let sumDiff = 0;
+  for (let i = 1; i < periods.length; i++) sumDiff += Math.abs(periods[i] - periods[i-1]);
+  const absJitter  = sumDiff / (periods.length - 1);
+  const meanPeriod = periods.reduce((a,b)=>a+b,0) / periods.length;
+  return absJitter / meanPeriod;
+}
+
+function computeSyllableRate(rms, speaking) {
+  rmsFrameHistory.push({rms, speaking, t: Date.now()});
+  if (rmsFrameHistory.length > 15) rmsFrameHistory.shift();
+  const spoken = rmsFrameHistory.filter(h => h.speaking && h.rms > 0.01);
+  if (spoken.length < 4) return 0;
+  let peaks = 0;
+  for (let i = 1; i < spoken.length - 1; i++) {
+    if (spoken[i].rms > spoken[i-1].rms && spoken[i].rms > spoken[i+1].rms) peaks++;
+  }
+  const durSec = (rmsFrameHistory[rmsFrameHistory.length-1].t - rmsFrameHistory[0].t) / 1000;
+  return durSec > 0.5 ? peaks / durSec : 0;
+}
+
+async function startMic() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.25;
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+    micActive = true;
+    document.getElementById('voiceLabel').textContent = 'SILENT';
+  } catch(e) {
+    micActive = false;
+    document.getElementById('voiceLabel').textContent = 'NO MIC';
+    console.warn('[VERITY] Mic unavailable:', e.message);
+  }
+}
+
+function stopMic() {
+  if (audioCtx) { audioCtx.close(); audioCtx = null; }
+  analyser  = null;
+  micActive = false;
+  vuRmsSmooth = 0;
+  // Reset both panels
+  ['voiceDot','recVoiceDot'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.classList.remove('speaking');
+  });
+  ['voiceLabel','recVoiceLabel'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = 'MIC OFF';
+  });
+  ['voicePitch','recVoicePitch'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '';
+  });
+  setVuLevel('vuLevel',    0); setVuLevel('vuVoice',    0);
+  setVuLevel('vuLevelRec', 0); setVuLevel('vuVoiceRec', 0);
+}
+
+function estimatePitch(buf, sampleRate) {
+  // Normalized autocorrelation over speech range 70–400 Hz
+  const minLag = Math.floor(sampleRate / 400);
+  const maxLag = Math.floor(sampleRate / 70);
+  let bestCorr = -1, bestLag = -1;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let num = 0, d1 = 0, d2 = 0;
+    for (let i = 0; i < buf.length - lag; i++) {
+      num += buf[i] * buf[i + lag];
+      d1  += buf[i] * buf[i];
+      d2  += buf[i + lag] * buf[i + lag];
+    }
+    const corr = num / (Math.sqrt(d1 * d2) + 1e-10);
+    if (corr > bestCorr) { bestCorr = corr; bestLag = lag; }
+  }
+  return (bestLag > 0 && bestCorr > 0.25) ? sampleRate / bestLag : 0;
+}
+
+function extractAudioFeatures() {
+  if (!analyser || !micActive) return null;
+  const buf = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(buf);
+
+  // RMS energy
+  let sumSq = 0;
+  for (let i = 0; i < buf.length; i++) sumSq += buf[i] * buf[i];
+  const rms = Math.sqrt(sumSq / buf.length);
+
+  // Zero-crossing rate
+  let zcr = 0;
+  for (let i = 1; i < buf.length; i++)
+    if ((buf[i] >= 0) !== (buf[i-1] >= 0)) zcr++;
+  zcr /= buf.length;
+
+  const speaking = rms > 0.008;
+  const pitch     = speaking ? estimatePitch(buf, audioCtx.sampleRate) : 0;
+
+  // Extended features
+  const jitter         = computeJitter(pitch);
+  const syllable_rate  = computeSyllableRate(rms, speaking);
+  const pause_ms       = updatePauseTracking(speaking);
+  const speech_minutes = sessionSpeechMs / 60000;
+  const pause_rate     = speech_minutes > 0.1 ? sessionPauses.length / speech_minutes : 0;
+
+  return {
+    rms:          +rms.toFixed(4),
+    zcr:          +zcr.toFixed(4),
+    pitch:        +pitch.toFixed(1),
+    speaking,
+    jitter:       +jitter.toFixed(4),
+    syllable_rate: +syllable_rate.toFixed(2),
+    pause_ms:     Math.round(pause_ms),
+    pause_rate:   +pause_rate.toFixed(2),
+  };
+}
+
+// ── VU Meter ──────────────────────────────────────────────
+const VU_SEGS = 28;
+// Segment colour zones: 0–17 green, 18–22 yellow, 23–27 red
+function vuColor(i) {
+  return i < 18 ? 'g' : i < 23 ? 'y' : 'r';
+}
+function buildVuBar(id) {
+  const bar = document.getElementById(id);
+  bar.innerHTML = '';
+  for (let i = 0; i < VU_SEGS; i++) {
+    const d = document.createElement('div');
+    const c = vuColor(i);
+    d.className = `vu-seg ghost${c === 'y' ? '-y' : c === 'r' ? '-r' : ''}`;
+    d.dataset.i = i;
+    bar.appendChild(d);
+  }
+}
+function setVuLevel(id, level) {   // level 0-1
+  const lit = Math.round(level * VU_SEGS);
+  const bar = document.getElementById(id);
+  bar.querySelectorAll('.vu-seg').forEach((seg, i) => {
+    const c = vuColor(i);
+    if (i < lit) {
+      seg.className = `vu-seg on-${c}`;
+    } else {
+      seg.className = `vu-seg ghost${c === 'y' ? '-y' : c === 'r' ? '-r' : ''}`;
+    }
+  });
+}
+
+// Initialise all four bars on load
+buildVuBar('vuLevel');
+buildVuBar('vuVoice');
+buildVuBar('vuLevelRec');
+buildVuBar('vuVoiceRec');
+
+// Smooth RMS for the level meter (fast decay, fast attack)
+let vuRmsSmooth = 0;
+
+function updateVoiceUI(voice) {
+  // Helper that updates one set of meter elements
+  function applyToPanel(dotId, lblId, pitchId, levelBarId, voiceBarId) {
+    const dot   = document.getElementById(dotId);
+    const lbl   = document.getElementById(lblId);
+    const pitch = document.getElementById(pitchId);
+    if (!dot) return;
+
+    if (!micActive) {
+      lbl.textContent = 'MIC OFF';
+      pitch.textContent = '';
+      setVuLevel(levelBarId, 0);
+      setVuLevel(voiceBarId, 0);
+      return;
+    }
+
+    const rawRms  = voice.rms || 0;
+    const normRms = Math.min(rawRms / 0.10, 1.0);
+    vuRmsSmooth   = Math.max(normRms, vuRmsSmooth * 0.82);
+    setVuLevel(levelBarId, vuRmsSmooth);
+    setVuLevel(voiceBarId, voice.voice_score || 0);
+
+    if (voice.speaking) {
+      dot.classList.add('speaking');
+      lbl.textContent   = 'SPEAKING';
+      pitch.textContent = voice.pitch > 0 ? voice.pitch.toFixed(0) + ' Hz' : '';
+    } else {
+      dot.classList.remove('speaking');
+      lbl.textContent   = 'SILENT';
+      pitch.textContent = '';
+      vuRmsSmooth *= 0.70;
+      setVuLevel(levelBarId, vuRmsSmooth);
+    }
+  }
+
+  applyToPanel('voiceDot',    'voiceLabel',    'voicePitch',    'vuLevel',    'vuVoice');
+  applyToPanel('recVoiceDot', 'recVoiceLabel', 'recVoicePitch', 'vuLevelRec', 'vuVoiceRec');
+}
+
+// ── Question segmentation ─────────────────────────────────
+async function markQuestion() {
+  const btn = document.getElementById('markQBtn');
+  btn.disabled = true;
+  btn.textContent = '◈ MARKING…';
+  try {
+    startLatencyTimer();
+  const res  = await fetch('/mark_question', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      btn.textContent = `◈ Q${data.question} MARKED`;
+      setTimeout(() => { btn.textContent = '◈ MARK QUESTION'; btn.disabled = false; }, 2000);
+    } else {
+      btn.textContent = '◈ MARK QUESTION'; btn.disabled = false;
+    }
+  } catch(e) { btn.textContent = '◈ MARK QUESTION'; btn.disabled = false; }
+}
+
+function updateQuestionTimeline(summaries, current) {
+  const list = document.getElementById('qList');
+  if (!summaries || Object.keys(summaries).length === 0) {
+    list.innerHTML = '<div class="q-empty">No questions marked yet</div>';
+    return;
+  }
+  list.innerHTML = '';
+  const nums = Object.keys(summaries).map(Number).sort((a,b)=>a-b);
+  nums.forEach(q => {
+    const s = summaries[q];
+    const pct  = Math.min(s.avg, 100);
+    const col  = pct < 25 ? 'var(--green)' : pct < 55 ? 'var(--amber)' : 'var(--red)';
+    const live = q === current ? ' style="background:rgba(176,127,255,0.05)"' : '';
+    const zCol = s.z_score != null ? getZScoreColor(s.z_score) : 'var(--text)';
+    const zStr = s.z_score != null ? ` z=${s.z_score>0?'+':''}${s.z_score}` : '';
+    list.innerHTML += `<div class="q-row"${live}>
+      <span class="q-num">Q${q}${q===current?'▸':''}</span>
+      <div class="q-bar-wrap"><div class="q-bar" style="width:${pct}%;background:${col}"></div></div>
+      <span class="q-score" style="color:${col}">${s.avg}%</span>
+      <span class="q-clues" style="color:${zCol};min-width:52px;text-align:right">${zStr}</span>
+    </div>`;
+  });
+}
+
+// ── Heart rate display ────────────────────────────────────
+const hrBpmHistory = [];   // last 40 BPM readings for sparkline
+
+function updateHrUI(hr) {
+  const bpmEl    = document.getElementById('hrBpm');
+  const iconEl   = document.getElementById('hrIcon');
+  const statusEl = document.getElementById('hrStatus');
+  const qualEl   = document.getElementById('hrQual');
+  const sparkEl  = document.getElementById('hrSpark');
+
+  const bpm     = hr.bpm     || 0;
+  const quality = hr.quality || 0;
+
+  // Accumulate BPM history for sparkline
+  if (bpm > 0) {
+    hrBpmHistory.push(bpm);
+    if (hrBpmHistory.length > 40) hrBpmHistory.shift();
+  }
+
+  if (bpm <= 0 || quality < 0.15) {
+    bpmEl.textContent    = '— BPM';
+    iconEl.textContent   = '♡';
+    iconEl.style.color   = 'var(--border)';
+    statusEl.textContent = 'CALIBRATING';
+    statusEl.style.color = 'var(--text)';
+    qualEl.textContent   = 'SIGNAL: ACQUIRING';
+    return;
+  }
+
+  // Status and colour
+  const elevation = hr.elevation || 0;
+  let col, status;
+  if (elevation > 22)       { col='var(--red)';   status='ELEVATED ↑'; }
+  else if (elevation > 10)  { col='var(--amber)'; status='ABOVE REST ↑'; }
+  else if (bpm > 100)       { col='var(--amber)'; status='HIGH'; }
+  else if (bpm < 50)        { col='var(--cyan)';  status='LOW'; }
+  else                      { col='var(--green)'; status='NORMAL'; }
+
+  bpmEl.textContent    = Math.round(bpm) + ' BPM';
+  bpmEl.style.color    = col;
+  iconEl.textContent   = '♥';
+  iconEl.style.color   = col;
+  statusEl.textContent = status;
+  statusEl.style.color = col;
+  qualEl.textContent   = `SIGNAL: ${quality > 0.6 ? 'GOOD' : quality > 0.3 ? 'OK' : 'WEAK'}`;
+
+  // Sparkline SVG
+  if (hrBpmHistory.length >= 4 && sparkEl) {
+    const W = sparkEl.offsetWidth || 120;
+    const H = 18;
+    const vals = hrBpmHistory.slice(-30);
+    const lo = Math.min(...vals) - 3;
+    const hi = Math.max(...vals) + 3;
+    const range = Math.max(hi - lo, 10);
+    const pts = vals.map((v, i) => {
+      const x = (i / (vals.length - 1)) * W;
+      const y = H - ((v - lo) / range) * H;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    sparkEl.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8"/>
+    </svg>`;
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════
+// NEW FEATURE MODULES
+// ═══════════════════════════════════════════════════════════
+
+// ── Web Speech API: Disfluency detection ─────────────────────
+let speechRec = null, disfluencyCount = 0, totalDisfluency = 0;
+const FILLER_RE = /\b(um+|uh+|er+|ah+|like|you know|basically|literally|actually|so um|i mean)\b/gi;
+
+function initSpeechRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return;
+  speechRec = new SR();
+  speechRec.continuous = true; speechRec.interimResults = true;
+  speechRec.lang = 'en-US';
+  speechRec.onresult = function(ev) {
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      if (ev.results[i].isFinal) {
+        const t = ev.results[i][0].transcript;
+        const fillers = (t.match(FILLER_RE) || []).length;
+        disfluencyCount += fillers; totalDisfluency += fillers;
+      }
+    }
+  };
+  speechRec.onerror = () => {};
+  speechRec.onend = () => { if (liveState.running) try { speechRec.start(); } catch(_){} };
+}
+function startSpeechRec() { if (speechRec) try { speechRec.start(); } catch(_){} }
+function stopSpeechRec()  { if (speechRec) try { speechRec.stop();  } catch(_){} }
+function drainDisfluency() { const v = disfluencyCount; disfluencyCount = 0; return v; }
+
+// ── Response latency tracker ───────────────────────────────────
+let _qMarkTime = null, _lastLatency = 0;
+function startLatencyTimer() { _qMarkTime = Date.now(); _lastLatency = 0; }
+function checkLatency(speaking) {
+  if (_qMarkTime && speaking && _lastLatency === 0) {
+    _lastLatency = (Date.now() - _qMarkTime) / 1000;
+    _qMarkTime = null;
+  }
+  const v = _lastLatency; _lastLatency = 0; return v;
+}
+
+// ── LPC Formant analysis (F1, F2 from audio buffer) ─────────────
+function computeFormants(buf, sr) {
+  if (!buf || buf.length < 256) return { F1: 0, F2: 0 };
+  try {
+    const N = Math.min(buf.length, 512);
+    const pre = new Float32Array(N);
+    pre[0] = buf[0];
+    for (let i = 1; i < N; i++) pre[i] = buf[i] - 0.97 * buf[i-1];
+    // Windowing
+    for (let i = 0; i < N; i++) pre[i] *= 0.5 - 0.5 * Math.cos(2*Math.PI*i/N);
+    // LPC autocorrelation order 10
+    const p = 10;
+    const R = new Float32Array(p+1);
+    for (let k = 0; k <= p; k++) { let s=0; for (let i=0;i<N-k;i++) s+=pre[i]*pre[i+k]; R[k]=s; }
+    // Levinson-Durbin
+    const a = new Float32Array(p+1); a[0]=1; let E=R[0];
+    for (let m=1; m<=p; m++) {
+      let km=R[m]; for (let j=1;j<m;j++) km-=a[j]*R[m-j]; km/=(E||1);
+      const ac=[...a]; a[m]=km;
+      for (let j=1;j<m;j++) a[j]=ac[j]-km*ac[m-j];
+      E*=(1-km*km);
+    }
+    // Evaluate LPC spectrum at 512 points, find peaks
+    const npts=512; const peaks=[];
+    let prev=0;
+    for (let k=1; k<npts-1; k++) {
+      const f=k*sr/npts/2;
+      if (f<200||f>4500) continue;
+      let re=0,im=0;
+      for (let j=0;j<=p;j++){const th=2*Math.PI*j*k/npts;re+=a[j]*Math.cos(th);im+=a[j]*Math.sin(th);}
+      const h=1/(re*re+im*im+1e-10);
+      if (h>prev && (peaks.length===0||h>peaks[peaks.length-1].h)) {
+        const prevf=peaks.length?peaks[peaks.length-1].f:0;
+        if (f-prevf>100) peaks.push({f:Math.round(f),h});
+      }
+      prev=h;
+    }
+    peaks.sort((a,b)=>b.h-a.h);
+    const top=peaks.slice(0,3).sort((a,b)=>a.f-b.f);
+    return { F1: top[0]?.f||0, F2: top[1]?.f||0 };
+  } catch(e) { return {F1:0,F2:0}; }
+}
+
+// ── Subject profile (localStorage) ────────────────────────────
+const PROFILE_KEY = 'verity_subject_profile';
+
+function saveSubjectProfile(profileData, name) {
+  const p = { name: name||'Unknown', saved: Date.now(), data: profileData };
+  localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
+  return p;
+}
+
+function loadSubjectProfile() {
+  try { return JSON.parse(localStorage.getItem(PROFILE_KEY) || 'null'); } catch(_) { return null; }
+}
+
+async function applySubjectProfile() {
+  const p = loadSubjectProfile();
+  if (!p || !p.data) return false;
+  try {
+    const res = await fetch('/load_baseline', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ profile: p.data })
+    });
+    const d = await res.json();
+    return d.status === 'ok';
+  } catch(_) { return false; }
+}
+
+// ── Gaze & biometric UI updates ────────────────────────────────
+function updateGazeUI(gaze) {
+  const needle  = document.getElementById('gazeNeedle');
+  const gazeVal = document.getElementById('gazeVal');
+  const blinkEl = document.getElementById('blinkRate');
+  if (!needle) return;
+  const dev = gaze.current_deviation || 0;
+  const h   = gaze.horizontal || 0.5;
+  const pct = Math.max(5, Math.min(95, h * 100));
+  needle.style.left = pct + '%';
+  const blink = gaze.blink_rate || 0;
+  blinkEl.textContent = blink > 0 ? blink.toFixed(0) : '—';
+  blinkEl.style.color = blink < 6 ? 'var(--red)' : blink > 35 ? 'var(--amber)' : 'var(--green)';
+  if (dev < 0.2) { gazeVal.textContent = 'CENTER'; gazeVal.style.color = 'var(--green)'; }
+  else if (h < 0.4) { gazeVal.textContent = 'LEFT'; gazeVal.style.color = 'var(--amber)'; }
+  else { gazeVal.textContent = 'RIGHT'; gazeVal.style.color = 'var(--amber)'; }
+}
+
+function updateRespUI(bpm) {
+  const val = document.getElementById('respVal');
+  const st  = document.getElementById('respStatus');
+  if (!val) return;
+  if (!bpm || bpm <= 0) { val.textContent = '— BPM'; st.textContent = 'CALIBRATING'; st.style.color = 'var(--text)'; return; }
+  val.textContent = Math.round(bpm) + ' BPM';
+  val.style.color = bpm > 20 ? 'var(--red)' : bpm < 10 ? 'var(--cyan)' : 'var(--green)';
+  st.textContent  = bpm > 20 ? 'ELEVATED' : bpm < 10 ? 'LOW' : 'NORMAL';
+  st.style.color  = bpm > 20 ? 'var(--red)' : bpm < 10 ? 'var(--cyan)' : 'var(--green)';
+}
+
+// ── Z-score highlighting in question timeline ──────────────────
+function getZScoreColor(z) {
+  if (!z || isNaN(z)) return 'var(--text)';
+  if (z > 1.5)  return 'var(--red)';
+  if (z > 0.8)  return 'var(--amber)';
+  if (z < -0.8) return 'var(--green)';
+  return 'var(--text)';
+}
+
+async function captureAndAnalyse() {
+  if (!liveState.running) return;
+  const off = document.createElement('canvas');
+  off.width = video.videoWidth||640; off.height = video.videoHeight||480;
+  off.getContext('2d').drawImage(video, 0, 0);
+  try {
+    const res  = await fetch('/analyse', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({image: off.toDataURL('image/jpeg', 0.75), session_id: SESSION_ID, audio: (() => {
+      const af = extractAudioFeatures();
+      if (!af) return null;
+      // Disfluency count since last frame
+      af.disfluency_count = drainDisfluency();
+      // Response latency (seconds from MARK QUESTION to first speech)
+      af.response_latency = af.speaking ? checkLatency(true) : 0;
+      // LPC formants
+      if (analyser) {
+        const fb = new Float32Array(analyser.fftSize);
+        analyser.getFloatTimeDomainData(fb);
+        const fmts = computeFormants(fb, audioCtx.sampleRate);
+        af.F1 = fmts.F1; af.F2 = fmts.F2;
+      }
+      return af;
+    })()})
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      updateLiveUI(data);
+    } else if (data.error === 'no_face') {
+      handleNoFace(true);
+    } else {
+      // Surface the error so the user can see what's wrong
+      handleNoFace(false);
+      const msg = (data.message || data.error || 'BACKEND ERROR').substring(0, 28).toUpperCase();
+      setStatus('warning', msg);
+      console.warn('[VERITY] Backend error:', data);
+    }
+  } catch(e) {
+    // Network error — show in status bar, keep loop alive
+    setStatus('warning', 'NETWORK ERROR');
+    console.warn('[VERITY] Fetch error:', e);
+  }
+}
+
+function updateLiveUI(data) {
+  handleNoFace(false);
+  document.getElementById('frameCounter').textContent = `FRAME ${String(data.frame).padStart(4,'0')}`;
+
+  // Baseline status — driven by server-side baseline_features
+  updateBaselineUI(data.baseline_ready || false);
+
+  // Emotions
+  const em = data.emotions || {};
+  EMOTIONS.forEach(e => {
+    const v = em[e] || 0;
+    document.getElementById(`emoBar-${e}`).style.width = (v*100)+'%';
+    document.getElementById(`emoVal-${e}`).textContent = v.toFixed(2);
+  });
+
+  // Feature bars
+  const ft = data.features || {};
+  Object.keys(FEATURES_DISPLAY).forEach(k => {
+    const el = document.getElementById(`feat-${k}`);
+    if (!el) return;
+    const raw = ft[k] || 0;
+    el.style.width      = Math.min(Math.abs(raw)*300, 100)+'%';
+    el.style.background = raw < 0 ? 'var(--amber)' : 'var(--cyan)';
+  });
+
+  // Deception score
+  const dec   = data.deception || {};
+  const score = Math.round((dec.deception_score||0)*100);
+  updateDeceptionScore(score);
+
+  liveState.deceptionHistory.push(score);
+  if (liveState.deceptionHistory.length > 90) liveState.deceptionHistory.shift();
+  updateTimeline();
+  updateClues(dec.clues || []);
+  updateVoiceUI(data.voice || {});
+  updateHrUI(data.hr || {});
+  updateGazeUI(data.gaze || {});
+  updateRespUI(data.resp_rate || 0);
+  updateQuestionTimeline(data.question_summaries || {}, data.question_current || 0);
+
+  // Session log for AI analysis — rolling 5-min window (sampled at ~8fps = ~2400 max)
+  const _v = data.voice || {};
+  const _ft = data.features || {};
+  liveState.sessionLog.push({
+    deception_score: dec.deception_score || 0,
+    clues:           (dec.clues || []).map(c => ({type:c.type, label:c.label, severity:c.severity})),
+    emotions:        data.emotions       || {},
+    elapsed:         data.elapsed        || 0,
+    voice_score:     _v.voice_score      || 0,
+    speaking:        _v.speaking         || false,
+    pitch:           _v.pitch            || 0,
+    jitter:          _v.jitter           || 0,
+    rms:             _v.rms              || 0,
+    syllable_rate:   _v.syllable_rate    || 0,
+    pause_rate:      _v.pause_rate       || 0,
+    pause_ms:        _v.pause_ms         || 0,
+    disfluency_count: totalDisfluency,
+    response_latency: (_v.speaking && _lastLatency) ? _lastLatency : 0,
+    gaze_deviation:  _ft.gaze_deviation  || 0,
+    gaze_horizontal: _ft.gaze_horizontal || 0.5,
+    blink_rate:      _ft.blink_rate      || 0,
+    brow_asymmetry:  _ft.brow_asymmetry  || 0,
+  });
+  if (liveState.sessionLog.length > 2400) liveState.sessionLog.shift();
+  // Enable AI button once there's 10s of data
+  const aiBtn = document.getElementById('aiBtn');
+  if (aiBtn && liveState.sessionLog.length >= 10) aiBtn.disabled = false;
+
+  document.getElementById('metaElapsed').textContent  = data.elapsed + 's';
+  document.getElementById('metaDominant').textContent = (dec.dominant_emotion||'—').toUpperCase();
+  document.getElementById('metaConf').textContent     = ((dec.emotion_confidence||0)*100).toFixed(0)+'%';
+
+  drawOverlay(data);
+}
+
+// ── Calibration UI ─────────────────────────────────────
+let _calFlashed = false;   // only show quality banner once per session
+
+function updateBaselineUI(baselineReady) {
+  const bar   = document.getElementById('calBar');
+  const lbl   = document.getElementById('calPhaseLabel');
+  const pctEl = document.getElementById('calPct');
+  const fill  = document.getElementById('calFill');
+
+  if (baselineReady) {
+    bar.classList.add('hidden');
+  } else {
+    bar.classList.remove('hidden');
+    lbl.textContent  = 'RELAX FACE  ·  HOLD NEUTRAL  ·  THEN SET BASELINE';
+    pctEl.textContent = 'NOT SET';
+    fill.style.width  = '0%';
+  }
+}
+
+// ── Guided Calibration Wizard ─────────────────────────────
+const CALIB_STEPS = ['eyebrows', 'smile', 'anger'];
+let calibRunning = false;
+
+function skipCalibration() {
+  document.getElementById('calibWizard').classList.remove('visible');
+  calibRunning = false;
+}
+
+async function captureExpression(expr) {
+  const fill  = document.getElementById('cf-' + expr);
+  const badge = document.getElementById('cb-' + expr);
+  const step  = document.getElementById('cs-' + expr);
+
+  step.classList.add('active');
+  badge.className  = 'calib-badge capturing';
+  badge.textContent = 'HOLD…';
+
+  // Animate progress bar over 3 seconds
+  const start = Date.now();
+  const dur   = 3000;
+  await new Promise(resolve => {
+    function tick() {
+      const pct = Math.min((Date.now() - start) / dur * 100, 100);
+      fill.style.width = pct + '%';
+      if (pct < 100) requestAnimationFrame(tick); else resolve();
+    }
+    requestAnimationFrame(tick);
+  });
+
+  // Capture
+  try {
+    const res  = await fetch('/calibrate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({expression: expr})
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      step.classList.remove('active');
+      step.classList.add('done');
+      badge.className   = 'calib-badge done';
+      badge.textContent = '✓ DONE';
+    } else {
+      badge.className   = 'calib-badge waiting';
+      badge.textContent = 'RETRY';
+      fill.style.width  = '0%';
+      step.classList.remove('active');
+    }
+    return data.status === 'ok';
+  } catch(e) {
+    badge.className   = 'calib-badge waiting';
+    badge.textContent = 'ERROR';
+    fill.style.width  = '0%';
+    step.classList.remove('active');
+    return false;
+  }
+}
+
+async function runCalibrationWizard() {
+  calibRunning = true;
+  const wizard = document.getElementById('calibWizard');
+  wizard.classList.add('visible');
+  const statusEl = document.getElementById('calibStatus');
+
+  for (const expr of CALIB_STEPS) {
+    if (!calibRunning) return;
+    // Brief pause so user can read the instruction
+    statusEl.textContent = 'MAKE THE EXPRESSION SHOWN, THEN HOLD FOR 3 SECONDS';
+    await new Promise(r => setTimeout(r, 1500));
+    if (!calibRunning) return;
+    await captureExpression(expr);
+    await new Promise(r => setTimeout(r, 600));
+  }
+
+  if (calibRunning) {
+    statusEl.textContent = '✓ CALIBRATION COMPLETE — FULL PERSONALISED ACCURACY ACTIVE';
+    setTimeout(() => {
+      wizard.classList.remove('visible');
+      calibRunning = false;
+    }, 3000);
+  }
+}
+
+async function captureBaseline() {
+  // Update whichever button triggered this (live or record tab)
+  const btn    = document.getElementById('baselineBtn');
+  const recBtn = document.getElementById('recBaselineBtn');
+  const banner = document.getElementById('qualBanner');
+  [btn, recBtn].forEach(b => { if(b && !b.disabled) { b.disabled = true; b.textContent = b.textContent.replace('SET BASELINE','CAPTURING…').replace('HOLD NEUTRAL FIRST','CAPTURING…'); }});
+  if (btn) { btn.disabled = true; btn.textContent = '◎ CAPTURING…'; }
+
+  let data;
+  try {
+    const res = await fetch('/baseline', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+    data = await res.json();
+  } catch (e) {
+    [btn, recBtn].forEach(b => { if(b) { b.disabled = false; b.textContent = b === btn ? '◎ SET BASELINE' : '◎ SET BASELINE (HOLD NEUTRAL FIRST)'; }});
+    banner.className = 'quality-banner show warn';
+    document.getElementById('qualIcon').textContent = '⚠';
+    document.getElementById('qualText').textContent = 'NETWORK ERROR — CHECK CONNECTION';
+    setTimeout(() => banner.classList.remove('show'), 5000);
+    console.error('[VERITY] /baseline fetch error:', e);
+    return;
+  }
+
+  if (data.status === 'ok') {
+    if (btn) { btn.disabled = true; btn.textContent = '◎ BASELINE SET'; }
+    if (recBtn) { recBtn.disabled = true; recBtn.textContent = '◉ BASELINE SET'; }
+    document.getElementById('calBar').classList.add('hidden');
+    banner.className = 'quality-banner show good';
+    document.getElementById('qualIcon').textContent = '◉';
+    document.getElementById('qualText').textContent = `BASELINE LOCKED  ·  ${data.frames_used} FRAMES`;
+    setTimeout(() => banner.classList.remove('show'), 4000);
+    // Save subject profile to localStorage for cross-session persistence
+    if (data.profile) {
+      const name = prompt('Save subject profile? Enter subject name (or cancel to skip):');
+      if (name !== null) saveSubjectProfile(data.profile, name);
+    }
+    // Guided calibration is now MANUAL — user clicks the wizard steps themselves
+    // Auto-launching caused corrupted peaks when user wasn't following along
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = '◎ SET BASELINE'; }
+    if (recBtn) { recBtn.disabled = false; recBtn.textContent = '◎ SET BASELINE (HOLD NEUTRAL FIRST)'; }
+    banner.className = 'quality-banner show warn';
+    document.getElementById('qualIcon').textContent = '⚠';
+    document.getElementById('qualText').textContent = (data.error || 'BASELINE FAILED — TRY AGAIN').toUpperCase();
+    setTimeout(() => banner.classList.remove('show'), 6000);
+    console.warn('[VERITY] /baseline error:', data.error);
+  }
+}
+
+function updateDeceptionScore(score) {
+  document.getElementById('scoreDisplay').textContent = score;
+  const gauge   = document.getElementById('gaugeFill');
+  const verdict = document.getElementById('verdictLabel');
+  const big     = document.getElementById('scoreDisplay');
+
+  gauge.style.width = score + '%';
+
+  if (score < 25) {
+    gauge.style.background  = 'linear-gradient(90deg,var(--green),var(--cyan))';
+    verdict.textContent     = 'TRUTHFUL';
+    verdict.style.color     = 'var(--green)';
+    verdict.style.borderColor = 'var(--green-lo)';
+    big.style.color         = 'var(--white)';
+    if (liveState.running) setStatus('active', 'ACTIVE');
+  } else if (score < 55) {
+    gauge.style.background  = 'linear-gradient(90deg,var(--cyan),var(--amber))';
+    verdict.textContent     = 'INCONCLUSIVE';
+    verdict.style.color     = 'var(--amber)';
+    verdict.style.borderColor = 'var(--amber-lo)';
+    big.style.color         = 'var(--amber)';
+    if (liveState.running) setStatus('warning', 'MONITORING');
+  } else {
+    gauge.style.background  = 'linear-gradient(90deg,var(--amber),var(--red))';
+    verdict.textContent     = 'DECEPTION LIKELY';
+    verdict.style.color     = 'var(--red)';
+    verdict.style.borderColor = 'var(--red-lo)';
+    big.style.color         = 'var(--red)';
+    if (liveState.running) setStatus('alert', 'ALERT');
+  }
+}
+
+function updateTimeline() {
+  liveState.deceptionHistory.forEach((score,i) => {
+    const cell = document.getElementById(`tc-${i}`);
+    if (!cell) return;
+    if (!score) { cell.style.background='var(--dim)'; return; }
+    cell.style.background = score<25 ? 'var(--green-lo)' : score<55 ? 'var(--amber-lo)' : 'var(--red-lo)';
+  });
+}
+
+function updateClues(clues) {
+  const log   = document.getElementById('cluesLog');
+  const count = document.getElementById('clueCount');
+  count.textContent = clues.length ? `${clues.length} ACTIVE` : '0 ACTIVE';
+  count.style.color = clues.length ? 'var(--red)' : 'var(--text)';
+  if (!clues.length) {
+    log.innerHTML = `<div class="no-clues"><span>⬡</span><span>NO DECEPTION INDICATORS</span></div>`;
+    return;
+  }
+  log.innerHTML = clues.map(c => `
+    <div class="clue-card ${c.severity}">
+      <div class="clue-top">
+        <span class="clue-type ${c.type}">${c.type}</span>
+        <span class="clue-label">${c.label}</span>
+        <span class="severity-badge ${c.severity}">${c.severity}</span>
+      </div>
+      <div class="clue-detail">${c.detail}</div>
+    </div>`).join('');
+}
+
+function drawOverlay(data) {
+  const vw=video.videoWidth||640, vh=video.videoHeight||480;
+  canvas.width=vw; canvas.height=vh;
+  ctx.clearRect(0,0,vw,vh);
+  const regions = data.regions || {};
+  const score   = (data.deception?.deception_score||0)*100;
+  const color   = score<25?'#35c988':score<55?'#e8a135':'#e84040';
+  const hasClues= (data.deception?.clues||[]).length>0;
+  const rColors = {brow_left:'#35b4e8',brow_right:'#35b4e8',eye_left:'#35c988',eye_right:'#35c988',mouth:hasClues?'#e84040':'#e8a135',nose:'#9b59b6'};
+
+  // Flip the 2D context to match the CSS-mirrored video — landmark coords from the
+  // server are in the original (un-mirrored) camera space, so we mirror the draw
+  // context instead of the canvas element; this keeps HTML overlay text readable.
+  ctx.save();
+  ctx.translate(vw, 0);
+  ctx.scale(-1, 1);
+
+  Object.entries(regions).forEach(([name,pts]) => {
+    if (!pts||pts.length<2) return;
+    ctx.beginPath(); ctx.strokeStyle=rColors[name]||'#fff'; ctx.lineWidth=1; ctx.globalAlpha=0.6;
+    pts.forEach((p,i) => i===0?ctx.moveTo(p[0],p[1]):ctx.lineTo(p[0],p[1]));
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle=rColors[name]||'#fff'; ctx.globalAlpha=0.06; ctx.fill(); ctx.globalAlpha=1;
+  });
+
+  ctx.restore(); // un-flip before drawing text so it reads left-to-right
+
+  // Text: mirror the centroid x so the label floats above the face in the flipped view
+  const allPts = Object.values(regions).flat();
+  if (allPts.length) {
+    const cx  = allPts.reduce((s,p)=>s+p[0],0)/allPts.length;
+    const mirX = vw - cx;
+    const minY = Math.min(...allPts.map(p=>p[1]))-26;
+    ctx.font='bold 12px Share Tech Mono'; ctx.fillStyle=color; ctx.globalAlpha=0.9;
+    ctx.fillText(`DECEPTION: ${Math.round(score)}%`, mirX-58, minY);
+    ctx.globalAlpha=1;
+  }
+}
+
+function handleNoFace(show) {
+  const ov = document.getElementById('noFaceOverlay');
+  show ? ov.classList.remove('hidden') : ov.classList.add('hidden');
+}
+
+// ── AI Forensic Report ────────────────────────────────────
+function closeReport() {
+  document.getElementById('reportModal').classList.remove('open');
+}
+
+function renderAIReport(report) {
+  const s = report.stats || {};
+  const vk = (report.verdict || '').toLowerCase();
+  const verdictCls = vk.includes('deception') ? 'deception' : vk.includes('inconclusive') ? 'inconclusive' : 'truthful';
+
+  document.getElementById('rptSubtitle').textContent =
+    `SESSION · ${new Date().toLocaleString()} · EKMAN–FRIESEN FRAMEWORK`;
+
+  const vEl = document.getElementById('rptVerdict');
+  vEl.className = 'rpt-verdict ' + verdictCls;
+  document.getElementById('rptVerdictLabel').textContent = (report.verdict || '—').toUpperCase();
+  document.getElementById('rptConfidence').textContent   = 'CONFIDENCE: ' + (report.confidence||'—').toUpperCase();
+
+  document.getElementById('rm-mean').textContent  = s.mean  != null ? s.mean  + '%' : '—';
+  document.getElementById('rm-peak').textContent  = s.peak  != null ? s.peak  + '%' : '—';
+  document.getElementById('rm-trend').textContent = (s.trend || '—').toUpperCase();
+  document.getElementById('rm-dur').textContent   = s.duration != null ? s.duration + 's' : '—';
+  document.getElementById('rm-dom').textContent   = (s.dominant || '—').toUpperCase();
+
+  document.getElementById('rptNarrative').textContent = report.narrative || '';
+
+  document.getElementById('rptFindings').innerHTML = (report.key_findings || [])
+    .map(f => `<div class="rpt-finding">${f}</div>`).join('');
+
+  const vBlock = document.getElementById('rptVoiceBlock');
+  if (report.voice_summary) {
+    document.getElementById('rptVoice').textContent = report.voice_summary;
+    vBlock.style.display = '';
+  } else { vBlock.style.display = 'none'; }
+
+  document.getElementById('rptExaminer').textContent = report.examiner_note || '';
+  document.getElementById('rptFooter').textContent =
+    `Generated ${new Date().toLocaleString()} · ${s.samples||0} frames · Model: claude-sonnet-4-6 · ` +
+    `VERITY uses Paul Ekman & Wallace Friesen's Unmasking the Face (2003). ` +
+    `No automated system can determine deception with certainty. Research and educational use only.`;
+
+  document.getElementById('reportModal').classList.add('open');
+}
+
+async function requestAIAnalysis() {
+  const btn  = document.getElementById('aiBtn');
+  const body = document.getElementById('aiBody');
+  if (!liveState.sessionLog.length) return;
+
+  btn.disabled = true;
+  btn.classList.add('loading');
+  btn.textContent = 'ANALYSING...';
+  body.innerHTML  = '<div class="ai-placeholder">Claude is reviewing session data — report will open when ready...</div>';
+
+  try {
+    const res  = await fetch('/ai_analysis', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ session_id: SESSION_ID, history: liveState.sessionLog }),
+    });
+    const data = await res.json();
+
+    if (data.status === 'ok' && data.report) {
+      body.innerHTML = '<div class="ai-placeholder" style="color:var(--green)">✓ Report generated — opening now...</div>';
+      renderAIReport(data.report);
+    } else if (data.status === 'ok' && data.raw) {
+      document.getElementById('rptNarrative').textContent = data.raw;
+      document.getElementById('rptVerdictLabel').textContent = 'REPORT';
+      document.getElementById('reportModal').classList.add('open');
+      body.innerHTML = '<div class="ai-placeholder" style="color:var(--green)">✓ Report generated</div>';
+    } else {
+      body.innerHTML = `<div class="ai-placeholder" style="color:var(--amber)">⚠ ${data.message || data.error || 'Analysis failed'}</div>`;
+    }
+  } catch (e) {
+    body.innerHTML = `<div class="ai-placeholder" style="color:var(--red)">✕ Request failed: ${e.message}</div>`;
+  } finally {
+    btn.classList.remove('loading');
+    btn.disabled    = false;
+    btn.textContent = 'REFRESH';
+  }
+}
+
+async function resetSession() {
+  await fetch('/reset', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({session_id: SESSION_ID})
+  });
+  // Reset client state
+  liveState.deceptionHistory = []; liveState.frameCount = 0; liveState.sessionLog = [];
+  // Reset audio tracking state
+  recentPitches = []; rmsFrameHistory = []; pauseStartTime = null;
+  lastSpeakingState = false; sessionSpeechMs = 0; sessionPauses = [];
+  document.getElementById('markQBtn').textContent = '◈ MARK QUESTION';
+  document.getElementById('qList').innerHTML = '<div class="q-empty">No questions marked yet</div>';
+  skipCalibration();
+  CALIB_STEPS.forEach(e => {
+    const s = document.getElementById('cs-'+e);
+    const b = document.getElementById('cb-'+e);
+    const f = document.getElementById('cf-'+e);
+    if(s){s.classList.remove('active','done');} if(b){b.className='calib-badge waiting';b.textContent='WAITING';} if(f)f.style.width='0%';
+  });
+  document.getElementById('aiBtn').disabled  = true;
+  document.getElementById('aiBtn').textContent = 'REQUEST';
+  document.getElementById('aiBody').innerHTML  = '<div class="ai-placeholder">Collect 10+ seconds of data, then request a Claude-powered forensic narrative.</div>';
+  // Reset baseline bar
+  const bar = document.getElementById('calBar');
+  bar.classList.remove('hidden');
+  document.getElementById('calPhaseLabel').textContent = 'RELAX FACE  ·  HOLD NEUTRAL  ·  THEN SET BASELINE';
+  document.getElementById('calFill').style.width = '0%';
+  document.getElementById('calPct').textContent  = 'NOT SET';
+  document.getElementById('qualBanner').className = 'quality-banner';
+  // Reset baseline button
+  const bBtn = document.getElementById('baselineBtn');
+  bBtn.textContent = '◎ SET BASELINE';
+  bBtn.disabled    = !liveState.running;
+  // Reset readouts
+  document.getElementById('frameCounter').textContent = 'FRAME 0000';
+  document.getElementById('metaElapsed').textContent  = '0.0s';
+  document.getElementById('metaDominant').textContent = '—';
+  document.getElementById('metaConf').textContent     = '—';
+  document.getElementById('scoreDisplay').textContent = '0';
+  updateDeceptionScore(0); updateTimeline(); updateClues([]);
+}
+
+// ═══════════════════════════════════════════════════
+// RECORD & ANALYSE
+// ═══════════════════════════════════════════════════
+const recVideo    = document.getElementById('recVideoEl');
+const recPlayback = document.getElementById('recPlaybackEl');
+
+async function startRecordCameraPreview() {
+  if (recStream) return;
+  try {
+    recStream = await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'},audio:false});
+    recVideo.srcObject = recStream;
+    recVideo.style.display = 'block';
+    recPlayback.style.display = 'none';
+    document.getElementById('recStatusBadge').textContent = 'CAMERA READY';
+    document.getElementById('recBaselineBtn').disabled = false;
+
+    // Background analysis loop — sends frames to /analyse every 500ms during preview
+    // so expression_history fills up and /baseline has data to work with.
+    // Stopped when recording begins to save resources during capture.
+    const offPreview = document.createElement('canvas');
+    offPreview.width = 320; offPreview.height = 240;
+    recState.previewInterval = setInterval(async () => {
+      if (recState.mediaRecorder && recState.mediaRecorder.state === 'recording') return;
+      const ctx2 = offPreview.getContext('2d');
+      ctx2.drawImage(recVideo, 0, 0, 320, 240);
+      const dataUrl = offPreview.toDataURL('image/jpeg', 0.6);
+      const af = extractAudioFeatures();
+      try {
+        const res = await fetch('/analyse', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({image: dataUrl, audio: af})
+        });
+        const data = await res.json();
+        if (data.status === 'ok' && data.voice) updateVoiceUI(data.voice);
+      } catch(_) {}
+    }, 500);
+
+  } catch(e) {
+    document.getElementById('recStatusBadge').textContent = 'NO CAMERA';
+  }
+}
+
+function startRecording() {
+  if (!recStream) { alert('Camera not available'); return; }
+  clearRecording(true);  // clear state but keep stream
+
+  const opts = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? {mimeType:'video/webm;codecs=vp9'}
+             : MediaRecorder.isTypeSupported('video/webm')             ? {mimeType:'video/webm'}
+             : {};
+  recState.mediaRecorder = new MediaRecorder(recStream, opts);
+  recState.chunks = [];
+
+  // Stop background preview analysis (saves resources during actual recording)
+  clearInterval(recState.previewInterval);
+
+  // Audio polling loop for the record-tab VU meters
+  recState.audioInterval = setInterval(() => {
+    const af = extractAudioFeatures();
+    if (af) updateVoiceUI({ rms: af.rms, voice_score: 0, speaking: af.speaking, pitch: af.pitch });
+  }, 120);
+
+  recState.mediaRecorder.ondataavailable = e => { if(e.data.size>0) recState.chunks.push(e.data); };
+  recState.mediaRecorder.onstop = () => {
+    recState.blob = new Blob(recState.chunks, {type: recState.mediaRecorder.mimeType||'video/webm'});
+    const url = URL.createObjectURL(recState.blob);
+    recPlayback.src = url;
+    recPlayback.style.display = 'block';
+    recVideo.style.display    = 'none';
+    const mb = (recState.blob.size/1048576).toFixed(1);
+    document.getElementById('recSizeInfo').textContent = `Recording ready · ${mb} MB · ${formatTime(recState.seconds)}`;
+    document.getElementById('recAnalyseBtn').disabled = false;
+    document.getElementById('recClearBtn').disabled   = false;
+    document.getElementById('recStatusBadge').textContent = 'RECORDING READY';
+  };
+
+  recState.mediaRecorder.start(100);
+  recState.seconds = 0;
+  document.getElementById('recTimer').classList.add('active');
+  document.getElementById('recStatusBadge').textContent = '● RECORDING';
+  recState.timerInterval = setInterval(() => {
+    recState.seconds++;
+    document.getElementById('recTimer').textContent = formatTime(recState.seconds);
+    if (recState.seconds >= 300) stopRecording();
+  }, 1000);
+
+  document.getElementById('recStartBtn').disabled   = true;
+  document.getElementById('recStopBtn').disabled    = false;
+  document.getElementById('recAnalyseBtn').disabled = true;
+}
+
+function stopRecording() {
+  if (!recState.mediaRecorder || recState.mediaRecorder.state==='inactive') return;
+  recState.mediaRecorder.stop();
+  clearInterval(recState.timerInterval);
+  clearInterval(recState.audioInterval);
+  document.getElementById('recTimer').classList.remove('active');
+  document.getElementById('recStartBtn').disabled = false;
+  document.getElementById('recStopBtn').disabled  = true;
+}
+
+function clearRecording(keepStream=false) {
+  recState.blob = null; recState.uploadFile = null; recState.chunks = [];
+  if (recState.mediaRecorder && recState.mediaRecorder.state!=='inactive') {
+    try { recState.mediaRecorder.stop(); } catch(_){}
+  }
+  recState.mediaRecorder = null;
+  clearInterval(recState.timerInterval);
+  clearInterval(recState.audioInterval);
+  clearInterval(recState.previewInterval);
+  document.getElementById('recTimer').classList.remove('active');
+  document.getElementById('recTimer').textContent = '00:00';
+  recPlayback.style.display = 'none'; recPlayback.src = '';
+  recVideo.style.display    = 'block';
+  document.getElementById('recStartBtn').disabled   = false;
+  document.getElementById('recStopBtn').disabled    = true;
+  document.getElementById('recAnalyseBtn').disabled = true;
+  document.getElementById('recClearBtn').disabled   = true;
+  document.getElementById('recSizeInfo').textContent = '';
+  document.getElementById('recStatusBadge').textContent = keepStream ? 'CAMERA READY' : 'INITIALISING...';
+  // Reset upload zone
+  document.getElementById('uploadZone').classList.remove('has-file');
+  document.getElementById('uploadFileName').style.display = 'none';
+  document.getElementById('fileInput').value = '';
+}
+
+function handleFileUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  recState.uploadFile = file; recState.blob = null;
+  const mb = (file.size/1048576).toFixed(1);
+  document.getElementById('uploadZone').classList.add('has-file');
+  const fn = document.getElementById('uploadFileName');
+  fn.textContent = `${file.name}  ·  ${mb} MB`; fn.style.display = 'block';
+  document.getElementById('recAnalyseBtn').disabled = false;
+  document.getElementById('recClearBtn').disabled   = false;
+  document.getElementById('recStatusBadge').textContent = 'FILE LOADED';
+  recPlayback.src = URL.createObjectURL(file);
+  recPlayback.style.display = 'block';
+  recVideo.style.display    = 'none';
+}
+
+async function analyseRecording() {
+  const fileToSend = recState.uploadFile
+    || (recState.blob ? new File([recState.blob],'recording.webm',{type:'video/webm'}) : null);
+  if (!fileToSend) { alert('No recording or file to analyse'); return; }
+
+  document.getElementById('recAnalyseBtn').disabled = true;
+  document.getElementById('recStartBtn').disabled   = true;
+  const prog = document.getElementById('analysisProgress');
+  prog.classList.add('active');
+  setProgress(5, 'Uploading video to analysis engine...');
+
+  let pv = 5;
+  const pi = setInterval(() => {
+    if (pv < 85) {
+      pv += Math.random()*4;
+      const msg = pv<30 ? 'Decoding video frames...'
+                : pv<55 ? 'Running MediaPipe face mesh...'
+                : 'Applying Ekman deception analysis...';
+      setProgress(pv, msg);
+    }
+  }, 600);
+
+  const fd = new FormData();
+  fd.append('video', fileToSend);
+
+  try {
+    const res  = await fetch('/analyse_video',{method:'POST',body:fd});
+    clearInterval(pi);
+    if (!res.ok) throw new Error(`Server error ${res.status}`);
+    const data = await res.json();
+    setProgress(100, 'Analysis complete.');
+    setTimeout(() => prog.classList.remove('active'), 800);
+    if (data.status==='ok') renderReport(data);
+    else alert('Analysis failed: ' + (data.error||'Unknown error'));
+  } catch(e) {
+    clearInterval(pi); prog.classList.remove('active');
+    alert('Analysis error: ' + e.message);
+  } finally {
+    document.getElementById('recAnalyseBtn').disabled = false;
+    document.getElementById('recStartBtn').disabled   = false;
+  }
+}
+
+function setProgress(pct, detail) {
+  document.getElementById('progFill').style.width   = Math.min(pct,100)+'%';
+  document.getElementById('progDetail').textContent = detail;
+}
+
+// ═══════════════════════════════════════════════════
+// REPORT RENDERING
+// ═══════════════════════════════════════════════════
+function renderReport(data) {
+  const s  = data.summary;
+  const tl = data.timeline;
+
+  document.getElementById('emptyReport').style.display = 'none';
+  const rc = document.getElementById('reportContent');
+  rc.style.display = 'flex';
+
+  // Verdict header
+  const avg = Math.round(s.avg_deception);
+  const vScore = document.getElementById('rScore');
+  vScore.textContent  = avg;
+  vScore.style.color  = avg<25?'var(--green)':avg<55?'var(--amber)':'var(--red)';
+
+  const vTag = document.getElementById('rVerdict');
+  vTag.textContent      = s.verdict;
+  vTag.style.color      = s.verdict==='TRUTHFUL'?'var(--green)':s.verdict==='INCONCLUSIVE'?'var(--amber)':'var(--red)';
+  vTag.style.borderColor = vTag.style.color;
+
+  document.getElementById('rDuration').textContent = `${s.duration}s · ${s.samples_analysed} frames analysed`;
+
+  // Stats
+  document.getElementById('reportStats').innerHTML = [
+    ['AVG DECEPTION',  s.avg_deception+'%'],
+    ['PEAK DECEPTION', s.max_deception+'%'],
+    ['FACE COVERAGE',  s.face_coverage+'%'],
+    ['SAMPLES',        s.samples_analysed],
+  ].map(([k,v])=>`<div class="stat-cell"><div class="stat-key">${k}</div><div class="stat-val">${v}</div></div>`).join('');
+
+  // Chart
+  drawReportChart(tl, s.duration);
+
+  // Key moments
+  const scroll = document.getElementById('momentsScroll');
+  if (s.key_moments && s.key_moments.length) {
+    scroll.innerHTML = s.key_moments.map(m => {
+      const sev = m.deception_score>0.65?'CRITICAL':m.deception_score>0.45?'HIGH':'MEDIUM';
+      return `<div class="moment-card ${sev}" onclick="seekVideo(${m.t})">
+        <img class="moment-thumb" src="${m.thumb||''}" alt="${m.t}s">
+        <div class="moment-meta">
+          <div class="moment-time">${m.t.toFixed(1)}s</div>
+          <div class="moment-score">${Math.round(m.deception_score*100)}%</div>
+          <div class="moment-clues">${(m.clues||[]).map(c=>c.label).join(' · ').slice(0,32)}</div>
+        </div></div>`;
+    }).join('');
+  } else {
+    scroll.innerHTML = '<div style="font-size:0.68rem;color:var(--text);opacity:0.4;letter-spacing:0.12em">No flagged moments detected</div>';
+  }
+
+  // Clue frequency
+  const fl = document.getElementById('clueFreqList');
+  const maxC = Math.max(...Object.values(s.clue_freq), 1);
+  const entries = Object.entries(s.clue_freq).slice(0,10);
+  fl.innerHTML = entries.length
+    ? entries.map(([label,count]) => `
+      <div class="freq-row">
+        <div class="freq-label">${label}</div>
+        <div class="freq-bar-bg"><div class="freq-bar-fill" style="width:${(count/maxC*100).toFixed(0)}%"></div></div>
+        <div class="freq-count">${count}</div>
+      </div>`).join('')
+    : '<div style="font-size:0.68rem;opacity:0.4;letter-spacing:0.12em">No deception clues detected</div>';
+}
+
+function drawReportChart(timeline, duration) {
+  const cvs = document.getElementById('reportChart');
+  const W   = cvs.parentElement.clientWidth || 320;
+  const H   = 68;
+  cvs.width = W; cvs.height = H;
+  const c   = cvs.getContext('2d');
+  c.clearRect(0,0,W,H);
+
+  // BG
+  c.fillStyle = 'rgba(28,37,53,0.5)'; c.fillRect(0,0,W,H);
+
+  // Threshold lines
+  [[25,'rgba(53,201,136,0.2)'],[55,'rgba(232,64,64,0.2)']].forEach(([thr,col]) => {
+    const y = H-(thr/100)*H;
+    c.strokeStyle=col; c.setLineDash([4,4]); c.lineWidth=1;
+    c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); c.setLineDash([]);
+  });
+
+  const fs = timeline.filter(s=>s.face);
+  if (!fs.length) return;
+
+  // Area
+  const g = c.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'rgba(232,64,64,0.3)');
+  g.addColorStop(0.5,'rgba(232,161,53,0.15)');
+  g.addColorStop(1,'rgba(53,201,136,0.05)');
+  c.beginPath(); c.fillStyle=g;
+  fs.forEach((s,i) => {
+    const x=(s.t/duration)*W, y=H-s.deception_score*H;
+    if(i===0) c.moveTo(x,H);
+    c.lineTo(x,y);
+  });
+  c.lineTo((fs[fs.length-1].t/duration)*W, H);
+  c.closePath(); c.fill();
+
+  // Line
+  c.beginPath(); c.strokeStyle='#e8a135'; c.lineWidth=1.5;
+  fs.forEach((s,i) => {
+    const x=(s.t/duration)*W, y=H-s.deception_score*H;
+    i===0?c.moveTo(x,y):c.lineTo(x,y);
+  });
+  c.stroke();
+}
+
+function seekVideo(t) { recPlayback.currentTime = t; }
+
+// ═══════════════════════════════════════════════════
+// Utilities
+// ═══════════════════════════════════════════════════
+function formatTime(s) {
+  return `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
+}
+
+// Boot
+initUI();
+</script>
+<!-- ═══════════════════════════════════════════════════
+     Full-screen forensic report modal
+═══════════════════════════════════════════════════ -->
+<div class="report-modal" id="reportModal">
+  <div class="report-inner">
+
+    <div class="rpt-header">
+      <div class="rpt-title-block">
+        <div class="rpt-title">VERITY — FORENSIC ANALYSIS REPORT</div>
+        <div class="rpt-subtitle" id="rptSubtitle">SESSION · EKMAN–FRIESEN FRAMEWORK</div>
+      </div>
+      <button class="rpt-close" onclick="closeReport()">CLOSE ✕</button>
+    </div>
+
+    <div class="rpt-verdict" id="rptVerdict">
+      <div>
+        <div class="rpt-verdict-label" id="rptVerdictLabel">—</div>
+        <div class="rpt-confidence" id="rptConfidence">CONFIDENCE: —</div>
+      </div>
+    </div>
+
+    <div class="rpt-metrics" id="rptMetrics">
+      <div class="rpt-metric"><div class="rpt-metric-key">MEAN SCORE</div><div class="rpt-metric-val" id="rm-mean">—</div></div>
+      <div class="rpt-metric"><div class="rpt-metric-key">PEAK SCORE</div><div class="rpt-metric-val" id="rm-peak">—</div></div>
+      <div class="rpt-metric"><div class="rpt-metric-key">TREND</div><div class="rpt-metric-val" id="rm-trend">—</div></div>
+      <div class="rpt-metric"><div class="rpt-metric-key">DURATION</div><div class="rpt-metric-val" id="rm-dur">—</div></div>
+      <div class="rpt-metric"><div class="rpt-metric-key">DOMINANT</div><div class="rpt-metric-val" id="rm-dom">—</div></div>
+    </div>
+
+    <div class="rpt-block">
+      <div class="rpt-block-title">FORENSIC NARRATIVE</div>
+      <div class="rpt-block-body"><div class="rpt-narrative" id="rptNarrative"></div></div>
+    </div>
+
+    <div class="rpt-block">
+      <div class="rpt-block-title">KEY FINDINGS</div>
+      <div class="rpt-block-body"><div class="rpt-findings" id="rptFindings"></div></div>
+    </div>
+
+    <div class="rpt-block" id="rptVoiceBlock">
+      <div class="rpt-block-title">VOICE ANALYSIS</div>
+      <div class="rpt-block-body"><div class="rpt-voice" id="rptVoice"></div></div>
+    </div>
+
+    <div class="rpt-block">
+      <div class="rpt-block-title">EXAMINER NOTE</div>
+      <div class="rpt-block-body"><div class="rpt-examiner" id="rptExaminer"></div></div>
+    </div>
+
+    <div class="rpt-footer" id="rptFooter"></div>
+
+  </div>
+</div>
+
+</body>
+</html>

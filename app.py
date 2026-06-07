@@ -125,6 +125,21 @@ feature_peaks      = {}   # {expr: {feature: raw_mean}} — personalised range s
 frame_count        = 0
 session_start      = time.time()
 
+# ── Blink tracking ────────────────────────────────────────
+blink_history   = deque(maxlen=300)   # timestamps of detected blinks
+last_eye_open   = True                # previous frame eye state
+blink_rate_30s  = 0.0                 # rolling blink rate (blinks/min over 30s window)
+
+# ── Gaze history ──────────────────────────────────────────
+gaze_history    = deque(maxlen=HISTORY_LEN)   # {t, horizontal, deviation, vertical}
+
+# ── Disfluency / response latency (from frontend) ─────────
+disfluency_history   = deque(maxlen=HISTORY_LEN)  # per-frame disfluency counts
+latency_current      = 0.0           # most recent response latency (seconds)
+
+# ── Respiration proxy (low-freq rPPG component) ──────────
+resp_history    = deque(maxlen=60)    # breaths/min estimates
+
 # ── Voice state ───────────────────────────────────────────
 VOICE_HISTORY_LEN = 90          # ~11s at one sample per 120ms (extended for pause analysis)
 voice_history  = deque(maxlen=VOICE_HISTORY_LEN)
@@ -262,6 +277,66 @@ def extract_features(landmarks, w, h):
     jaw_center  = lm(landmarks, 152, w, h)
     jaw_drop = norm(float(jaw_center[1] - mouth_bot[1]))
 
+    # ── Gaze direction (iris landmarks — refine_landmarks=True required) ──────
+    # Iris centers: 468 (left), 473 (right)
+    # Eye corners: left outer=33, left inner=133, right inner=362, right outer=263
+    try:
+        left_iris   = lm(landmarks, 468, w, h)
+        right_iris  = lm(landmarks, 473, w, h)
+        left_inner  = lm(landmarks, 133, w, h)
+        right_inner = lm(landmarks, 362, w, h)
+        l_eye_w = max(euclidean(left_eye_outer,  left_inner),  1.0)
+        r_eye_w = max(euclidean(right_eye_outer, right_inner), 1.0)
+        # Ratio 0=outer edge, 1=inner edge; 0.5=center
+        l_gaze_h = (left_iris[0]  - left_eye_outer[0])  / l_eye_w
+        r_gaze_h = (right_iris[0] - right_eye_outer[0]) / r_eye_w
+        gaze_horizontal = float((l_gaze_h + r_gaze_h) / 2)
+        gaze_deviation  = float(abs(gaze_horizontal - 0.5) * 2)   # 0=center, 1=extreme lateral
+        # Vertical: iris y relative to eye height
+        l_vert = (left_iris[1]  - eye_top_L[1]) / max(eye_open_L * iod, 1.0)
+        r_vert = (right_iris[1] - eye_top_R[1]) / max(eye_open_R * iod, 1.0)
+        gaze_vertical = float((l_vert + r_vert) / 2)
+    except Exception:
+        gaze_horizontal = 0.5
+        gaze_deviation  = 0.0
+        gaze_vertical   = 0.5
+
+    # ── Pupil dilation (iris boundary diameter, normalised by IOD) ───────────
+    # Left iris boundary: 469-472; Right: 474-477
+    try:
+        l_ib = [lm(landmarks, i, w, h) for i in [469, 470, 471, 472]]
+        r_ib = [lm(landmarks, i, w, h) for i in [474, 475, 476, 477]]
+        l_diam = (euclidean(l_ib[0], l_ib[2]) + euclidean(l_ib[1], l_ib[3])) / 2
+        r_diam = (euclidean(r_ib[0], r_ib[2]) + euclidean(r_ib[1], r_ib[3])) / 2
+        pupil_ratio = norm((l_diam + r_diam) / 2)
+    except Exception:
+        pupil_ratio = 0.0
+
+    # ── Facial asymmetry (bilateral feature differences) ─────────────────────
+    # Genuine emotions are symmetric; managed/posed expressions often asymmetric
+    brow_l_raw = angle_of_lift(landmarks, 107, 33,  w, h)
+    brow_r_raw = angle_of_lift(landmarks, 336, 263, w, h)
+    brow_mean  = max(abs(brow_l_raw + brow_r_raw) / 2, 0.001)
+    brow_asymmetry  = float(abs(brow_l_raw - brow_r_raw) / brow_mean)
+
+    eye_mean   = max((eye_open_L + eye_open_R) / 2, 0.001)
+    eye_asymmetry   = float(abs(eye_open_L - eye_open_R) / eye_mean)
+
+    cheek_l_raw = angle_of_lift(landmarks, 116, 145, w, h)
+    cheek_r_raw = angle_of_lift(landmarks, 345, 374, w, h)
+    cheek_mean  = max(abs(cheek_l_raw + cheek_r_raw) / 2, 0.001)
+    mouth_asym_l = float(nose_tip[1] - mouth_L[1])
+    mouth_asym_r = float(nose_tip[1] - mouth_R[1])
+    mouth_asymmetry = norm(abs(mouth_asym_l - mouth_asym_r))
+
+    # ── Head pose (yaw / pitch from nose tip relative to eye midpoint) ────────
+    eye_mid_x = float((left_eye_outer[0] + right_eye_outer[0]) / 2)
+    eye_mid_y = float((left_eye_outer[1] + right_eye_outer[1]) / 2)
+    nose_tip_pt = lm(landmarks, 4, w, h)
+    # Positive yaw = turned right; positive pitch = looking down
+    head_yaw   = float((nose_tip_pt[0] - eye_mid_x) / max(iod, 1.0))
+    head_pitch = float((nose_tip_pt[1] - eye_mid_y) / max(iod, 1.0))
+
     return {
         "inner_brow_raise":  round(inner_brow_raise,  4),
         "outer_brow_raise":  round(outer_brow_raise,  4),
@@ -276,6 +351,16 @@ def extract_features(landmarks, w, h):
         "lip_press":         round(lip_press,          4),
         "nose_wrinkle":      round(nose_wrinkle,       4),
         "jaw_drop":          round(jaw_drop,           4),
+        # New biometric channels
+        "gaze_horizontal":   round(gaze_horizontal,   4),
+        "gaze_deviation":    round(gaze_deviation,    4),
+        "gaze_vertical":     round(gaze_vertical,     4),
+        "pupil_ratio":       round(pupil_ratio,       4),
+        "brow_asymmetry":    round(min(brow_asymmetry, 3.0), 4),
+        "eye_asymmetry":     round(min(eye_asymmetry,  3.0), 4),
+        "mouth_asymmetry":   round(mouth_asymmetry,   4),
+        "head_yaw":          round(head_yaw,          4),
+        "head_pitch":        round(head_pitch,        4),
     }
 
 # ──────────────────────────────────────────────────────────
@@ -590,6 +675,90 @@ def analyse_deception(features, emotions, history_features, history_times):
             "severity": "MEDIUM"
         })
 
+    # ── 5. GAZE & BLINK (autonomic oculomotor signals) ────────────────────
+    gaze_dev    = features.get("gaze_deviation", 0)
+    blink_rt    = features.get("blink_rate", 15)
+
+    # Sustained lateral gaze aversion — most significant when during specific questions
+    if gaze_dev > 0.40:
+        deception_components.append(0.45)
+        clues.append({
+            "type": "GAZE",
+            "label": "Sustained Gaze Aversion",
+            "detail": f"Significant lateral gaze deviation ({gaze_dev:.2f}). Research: consistent gaze aversion during questioning correlates with cognitive load of fabrication, particularly on specific rather than general questions.",
+            "severity": "MEDIUM"
+        })
+
+    # Blink suppression — high cognitive load during active fabrication
+    if 0 < blink_rt < 6:
+        deception_components.append(0.42)
+        clues.append({
+            "type": "GAZE",
+            "label": "Blink Suppression",
+            "detail": f"Blink rate {blink_rt:.0f}/min (normal: 15–20). Suppression indicates intense cognitive load consistent with active fabrication or intense concentration.",
+            "severity": "MEDIUM"
+        })
+
+    # Blink surge — post-answer anxiety release
+    if blink_rt > 40:
+        deception_components.append(0.45)
+        clues.append({
+            "type": "GAZE",
+            "label": "Blink Rate Surge",
+            "detail": f"Blink rate {blink_rt:.0f}/min (normal: 15–20). Elevation post-response indicates anxiety release or autonomic stress response.",
+            "severity": "MEDIUM"
+        })
+
+    # ── 6. FACIAL ASYMMETRY (Ekman: genuine = symmetric; posed = asymmetric) ─
+    brow_asym   = features.get("brow_asymmetry",  0)
+    eye_asym    = features.get("eye_asymmetry",   0)
+    mouth_asym  = features.get("mouth_asymmetry", 0)
+
+    # Asymmetric brow during emotional expression
+    if brow_asym > 0.40 and (emotions["happiness"] > 0.25 or emotions["sadness"] > 0.25 or emotions["fear"] > 0.25):
+        deception_components.append(0.55)
+        clues.append({
+            "type": "MORPHOLOGY",
+            "label": "Asymmetric Upper-Face Expression",
+            "detail": f"Brow asymmetry index {brow_asym:.2f} during emotional expression. Genuine emotions produce bilateral symmetry; asymmetry (especially stronger on dominant side) indicates managed/posed expression.",
+            "severity": "HIGH"
+        })
+
+    # Asymmetric smile — classic 'social smile' marker
+    if mouth_asym > 0.025 and emotions["happiness"] > 0.30:
+        deception_components.append(0.52)
+        clues.append({
+            "type": "MORPHOLOGY",
+            "label": "Asymmetric Smile",
+            "detail": f"Lip corner asymmetry ({mouth_asym:.3f}) during apparent happiness. Duchenne smiles are symmetric; asymmetric smiles are a reliable marker of deliberate expression production.",
+            "severity": "HIGH"
+        })
+
+    # ── 7. HEAD EVASION (postural discomfort / avoidance) ──────────────────
+    head_yaw = abs(features.get("head_yaw", 0))
+    if head_yaw > 0.18:
+        deception_components.append(0.38)
+        clues.append({
+            "type": "LEAKAGE",
+            "label": "Head Orientation Evasion",
+            "detail": f"Head yaw {head_yaw:.2f} from centre. Postural orientation away from interviewer is associated with avoidance and discomfort. Most significant when correlated with specific question content.",
+            "severity": "MEDIUM"
+        })
+
+    # ── 8. PUPIL DILATION (sympathetic arousal proxy) ──────────────────────
+    pupil = features.get("pupil_ratio", 0)
+    if baseline_features and pupil > 0:
+        pupil_bl = baseline_features.get("pupil_ratio", pupil)
+        pupil_delta = (pupil - pupil_bl) / max(pupil_bl, 0.001)
+        if pupil_delta > 0.25:   # >25% above baseline = significant arousal
+            deception_components.append(0.48)
+            clues.append({
+                "type": "BIOMETRIC",
+                "label": "Pupil Dilation Elevated",
+                "detail": f"Estimated pupil diameter {pupil_delta*100:.0f}% above personal baseline. Pupil dilation is a direct sympathetic nervous system signal — not voluntarily controlled — indicating arousal or stress.",
+                "severity": "HIGH"
+            })
+
     # ── Compute final deception score ─────────────────────────────
     if deception_components:
         # Weighted average, boosted by quantity (multiple simultaneous clues = stronger signal)
@@ -888,6 +1057,18 @@ def compute_hr_bpm(buf):
     fft_mag = np.abs(np.fft.rfft(signal, n=n_fft))
     freqs   = np.fft.rfftfreq(n_fft, d=1.0 / fs)
 
+    # Respiratory band 0.15–0.5 Hz (9–30 breaths/min) — extract before cardiac
+    resp_mask = (freqs >= 0.15) & (freqs <= 0.5)
+    resp_bpm  = 0.0
+    if np.any(resp_mask):
+        resp_mag  = fft_mag[resp_mask]
+        resp_freq = freqs[resp_mask]
+        resp_peak = float(resp_freq[int(np.argmax(resp_mag))]) * 60.0
+        if 9 <= resp_peak <= 30:
+            resp_bpm = round(resp_peak, 1)
+    if resp_bpm > 0:
+        resp_history.append(resp_bpm)
+
     # Cardiac bandpass 0.7–3.5 Hz
     mask = (freqs >= 0.7) & (freqs <= 3.5)
     if not np.any(mask):
@@ -979,6 +1160,7 @@ def analyse_hr_deception(bpm, quality, history, baseline_bpm, current_deception_
 
 def process_frame(img_bytes, audio_features=None):
     global frame_count, baseline_features, emotion_ema
+    global last_eye_open, blink_rate_30s, latency_current
 
     # Decode image
     nparr  = np.frombuffer(base64.b64decode(img_bytes), np.uint8)
@@ -1022,6 +1204,31 @@ def process_frame(img_bytes, audio_features=None):
     expression_history.append(features)
     timestamp_history.append(now)
     frame_count += 1
+
+    # ── Blink detection & rate ────────────────────────────────────
+    eye_currently_open = features["eye_aperture"] > 0.07
+    if last_eye_open and not eye_currently_open:
+        blink_history.append(now)   # falling edge = blink
+    last_eye_open = eye_currently_open
+    # Rolling rate over 30s window
+    blink_rate_30s = sum(1 for t in blink_history if now - t < 30.0) * 2.0  # × 2 → per minute
+    features["blink_rate"] = round(blink_rate_30s, 1)
+
+    # ── Gaze history ─────────────────────────────────────────────
+    gaze_history.append({
+        "t":          now,
+        "horizontal": features["gaze_horizontal"],
+        "deviation":  features["gaze_deviation"],
+        "vertical":   features["gaze_vertical"],
+    })
+
+    # ── Disfluency & latency from frontend audio_features ────────
+    if audio_features:
+        disfluency_count = audio_features.get("disfluency_count", 0)
+        disfluency_history.append(disfluency_count)
+        lat = audio_features.get("response_latency", 0)
+        if lat > 0:
+            latency_current = lat
 
     # Baseline is now set manually via POST /baseline — no auto-capture
 
@@ -1130,16 +1337,32 @@ def process_frame(img_bytes, audio_features=None):
         if audio_features.get("syllable_rate", 0) > 0:
             qd["syllable_rates"].append(audio_features["syllable_rate"])
 
-    # Build question summary for the frontend
+    # Build question summary with z-scores for comparative analysis
     q_summaries = {}
+    all_q_scores = [float(np.mean(qd["scores"])) for qd in question_voice_data.values() if qd["scores"]]
+    q_mean = float(np.mean(all_q_scores)) if all_q_scores else 0
+    q_std  = float(np.std(all_q_scores))  if len(all_q_scores) > 1 else 1.0
     for q, qd in question_voice_data.items():
         if qd["scores"]:
+            q_avg = float(np.mean(qd["scores"]))
             q_summaries[q] = {
-                "avg": round(float(np.mean(qd["scores"])) * 100, 1),
-                "max": round(float(np.max(qd["scores"]))  * 100, 1),
+                "avg":     round(q_avg * 100, 1),
+                "max":     round(float(np.max(qd["scores"])) * 100, 1),
                 "n_clues": len(set(c["label"] for c in qd["clues"])),
                 "n_frames": len(qd["scores"]),
+                "z_score": round((q_avg - q_mean) / max(q_std, 0.001), 2),
             }
+
+    # Gaze summary (rolling 3s window)
+    recent_gaze = list(gaze_history)[-30:]
+    gaze_summary = {
+        "mean_deviation": round(float(np.mean([g["deviation"] for g in recent_gaze])), 3) if recent_gaze else 0,
+        "blink_rate":     round(blink_rate_30s, 1),
+        "current_deviation": round(features.get("gaze_deviation", 0), 3),
+    }
+
+    # Respiration rate (smoothed)
+    resp_rate = round(float(np.mean(list(resp_history)[-10:])), 1) if resp_history else 0.0
 
     return {
         "status":              "ok",
@@ -1151,6 +1374,8 @@ def process_frame(img_bytes, audio_features=None):
         "regions":             regions,
         "voice":               voice_result,
         "hr":                  hr_result,
+        "gaze":                gaze_summary,
+        "resp_rate":           resp_rate,
         "baseline_ready":      bool(baseline_features),
         "calibrating":         frame_count < 35,
         "calibration_exprs":   sorted(feature_peaks.keys()),
@@ -1215,17 +1440,25 @@ def reset():
     global voice_history, voice_baseline, baseline_sigma, feature_peaks
     global question_current, question_markers, question_voice_data
     global rppg_buffer, hr_history, hr_baseline
+    global last_eye_open, blink_rate_30s, latency_current
     expression_history.clear()
     timestamp_history.clear()
     voice_history.clear()
     rppg_buffer.clear()
     hr_history.clear()
+    blink_history.clear()
+    gaze_history.clear()
+    disfluency_history.clear()
+    resp_history.clear()
     baseline_features  = {}
     baseline_sigma     = {}
     feature_peaks      = {}
     voice_baseline     = {}
     emotion_ema        = {}
     hr_baseline        = 0.0
+    last_eye_open      = True
+    blink_rate_30s     = 0.0
+    latency_current    = 0.0
     question_current   = 0
     question_markers   = []
     question_voice_data = {}
@@ -1277,10 +1510,35 @@ def set_baseline():
             "frames_used":    len(recent),
             "voice_baseline": bool(voice_baseline),
             "hr_baseline":    round(hr_baseline, 1),
+            # Profile data — client can persist in localStorage for cross-session baseline
+            "profile": {
+                "baseline_features": baseline_features,
+                "baseline_sigma":    baseline_sigma,
+                "hr_baseline":       round(hr_baseline, 1),
+                "voice_baseline":    voice_baseline,
+            }
         })
 
     except Exception as exc:
         return jsonify({"error": f"Server error: {exc}"}), 500
+
+
+@app.route("/load_baseline", methods=["POST"])
+def load_baseline():
+    """Restore a previously saved subject profile (from localStorage on client)."""
+    global baseline_features, baseline_sigma, hr_baseline, voice_baseline
+    try:
+        data = request.get_json() or {}
+        profile = data.get("profile", {})
+        if not profile or not profile.get("baseline_features"):
+            return jsonify({"error": "No valid profile data"}), 400
+        baseline_features = profile.get("baseline_features", {})
+        baseline_sigma    = profile.get("baseline_sigma", {})
+        hr_baseline       = float(profile.get("hr_baseline", 0.0))
+        voice_baseline    = profile.get("voice_baseline", {})
+        return jsonify({"status": "ok", "message": "Profile restored successfully"})
+    except Exception as exc:
+        return jsonify({"error": f"Profile load error: {exc}"}), 500
 
 
 @app.route("/calibrate", methods=["POST"])
@@ -1371,65 +1629,95 @@ def ai_analysis():
                 else:
                     clue_freq[label] = clue_freq.get(label, 0) + 1
 
-        top_clues = sorted(clue_freq.items(), key=lambda x: -x[1])[:5]
-        top_voice = sorted(voice_clue_freq.items(), key=lambda x: -x[1])[:3]
+        top_clues = sorted(clue_freq.items(), key=lambda x: -x[1])[:8]
+        top_voice = sorted(voice_clue_freq.items(), key=lambda x: -x[1])[:5]
 
         # Voice metrics aggregation
         speaking_frames = [h for h in history if h.get("speaking")]
         total_frames    = len(history)
         speaking_pct    = round(len(speaking_frames) / max(total_frames, 1) * 100, 1)
-
         voiced_pitches  = [h["pitch"] for h in speaking_frames if h.get("pitch", 0) > 60]
         avg_pitch       = round(float(np.mean(voiced_pitches)),  1) if voiced_pitches else 0
         min_pitch       = round(float(np.min(voiced_pitches)),   1) if voiced_pitches else 0
         max_pitch       = round(float(np.max(voiced_pitches)),   1) if voiced_pitches else 0
         pitch_range     = round(max_pitch - min_pitch, 1)
-
         jitters         = [h["jitter"] for h in speaking_frames if h.get("jitter", 0) > 0]
-        avg_jitter      = round(float(np.mean(jitters)) * 100, 2) if jitters else 0   # as %
-
+        avg_jitter      = round(float(np.mean(jitters)) * 100, 2) if jitters else 0
         syl_rates       = [h["syllable_rate"] for h in speaking_frames if h.get("syllable_rate", 0) > 0]
         avg_syl_rate    = round(float(np.mean(syl_rates)), 2) if syl_rates else 0
-
         pause_rates     = [h["pause_rate"] for h in history if h.get("pause_rate", 0) > 0]
         avg_pause_rate  = round(float(np.mean(pause_rates)), 2) if pause_rates else 0
-
         rms_vals        = [h["rms"] for h in speaking_frames if h.get("rms", 0) > 0]
         avg_rms         = round(float(np.mean(rms_vals)), 4) if rms_vals else 0
 
-        # Peak moments (top 3 frames by score)
-        peaks    = sorted(enumerate(scores), key=lambda x: -x[1])[:3]
+        # Disfluency & response latency
+        total_disfluency = sum(h.get("disfluency_count", 0) for h in history)
+        speech_min = max(speaking_pct / 100 * duration / 60, 0.01)
+        disfluency_rate = round(total_disfluency / speech_min, 1)
+        latency_vals  = [h.get("response_latency", 0) for h in history if h.get("response_latency", 0) > 0]
+        avg_latency   = round(float(np.mean(latency_vals)), 2) if latency_vals else 0
+        max_latency   = round(float(np.max(latency_vals)), 2) if latency_vals else 0
+
+        # Gaze & blink aggregation
+        gaze_devs    = [h.get("gaze_deviation", 0) for h in history if h.get("gaze_deviation", 0) > 0]
+        avg_gaze_dev = round(float(np.mean(gaze_devs)), 3) if gaze_devs else 0
+        blink_rates  = [h.get("blink_rate", 0) for h in history if h.get("blink_rate", 0) > 0]
+        avg_blink    = round(float(np.mean(blink_rates)), 1) if blink_rates else 0
+        brow_asyms   = [h.get("brow_asymmetry", 0) for h in history]
+        avg_brow_asym = round(float(np.mean(brow_asyms)), 3) if brow_asyms else 0
+
+        # Question comparative z-scores
+        q_analysis_lines = []
+        if question_voice_data:
+            q_scores_map = {q: float(np.mean(qd["scores"])) for q, qd in question_voice_data.items() if qd["scores"]}
+            if q_scores_map:
+                q_vals = list(q_scores_map.values())
+                q_m, q_s = np.mean(q_vals), max(np.std(q_vals), 0.001)
+                for q in sorted(q_scores_map):
+                    z = (q_scores_map[q] - q_m) / q_s
+                    flag = " ← ANOMALOUS" if abs(z) > 1.5 else ""
+                    q_analysis_lines.append(f"  Q{q}: {q_scores_map[q]*100:.0f}% (z={z:+.2f}){flag}")
+        q_analysis = "\n".join(q_analysis_lines) or "  No questions marked"
+
+        # Peak moments (top 5)
+        peaks     = sorted(enumerate(scores), key=lambda x: -x[1])[:5]
         peak_strs = [f"{elapsed[i]:.0f}s ({scores[i]*100:.0f}%)" for i, _ in peaks if i < len(elapsed)]
 
         # ── Build prompt ───────────────────────────────────────────
-        clue_text  = "; ".join(f"{l} ({n}×)" for l, n in top_clues)  or "None detected"
-        voice_text = "; ".join(f"{l} ({n}×)" for l, n in top_voice) or "None detected"
+        clue_text  = "\n".join(f"  {l}: {n}×" for l, n in top_clues)  or "  None detected"
+        voice_text = "\n".join(f"  {l}: {n}×" for l, n in top_voice) or "  None detected"
 
-        prompt = f"""You are a forensic deception analyst reviewing output from VERITY, a real-time facial and vocal deception detection system based on Paul Ekman & Wallace Friesen's Unmasking the Face (2003).
+        prompt = f"""You are a forensic deception analyst reviewing output from VERITY, a multimodal deception detection system. Channels: facial landmarks (Ekman framework), gaze tracking, blink rate, pupil estimation, facial asymmetry, head pose, rPPG heart rate, respiration proxy, voice acoustics, speech disfluency, and response latency.
 
 SESSION SUMMARY
 Duration: {duration:.0f}s  |  Samples: {n}
 Deception score — mean: {np.mean(scores)*100:.1f}%  max: {max(scores)*100:.1f}%  trend: {trend}
-Early period avg: {t1*100:.1f}%  →  Mid: {t2*100:.1f}%  →  Late: {t3*100:.1f}%
-Dominant emotion detected: {dominant_emotion}
+Early: {t1*100:.1f}%  →  Mid: {t2*100:.1f}%  →  Late: {t3*100:.1f}%
+Dominant emotion: {dominant_emotion}
 
 FACIAL DECEPTION CLUES (by frequency)
 {clue_text}
 
+GAZE & OCULOMOTOR
+Mean gaze deviation from centre: {avg_gaze_dev} (0=centre, 1=extreme lateral)
+Mean blink rate: {avg_blink}/min  (normal 15–20; suppression=fabrication load; surge=post-answer anxiety)
+Mean brow asymmetry: {avg_brow_asym} (>0.4 = posed expression; genuine = symmetric)
+
 VOICE METRICS
 Speaking time: {speaking_pct}% of session
 Pitch — avg: {avg_pitch} Hz  min: {min_pitch} Hz  max: {max_pitch} Hz  range: {pitch_range} Hz
-  (typical speech: 85–180 Hz male / 165–255 Hz female; elevated pitch indicates stress)
-Jitter (pitch instability): {avg_jitter}%
-  (normal < 1.0%; values > 2% suggest vocal stress or tremor)
-Speech rate (syllables/sec): {avg_syl_rate}
-  (typical: 3–5 syl/s; very fast >5.5 or very slow <2 may indicate stress or deliberate control)
-Pause rate (pauses/min of speech): {avg_pause_rate}
-  (elevated rates suggest cognitive load, hesitation, or scripted recall)
+Jitter: {avg_jitter}%  (normal <1%; >2% = stress/tremor)
+Speech rate: {avg_syl_rate} syl/s  (typical 3–5; extremes = stress or rehearsal)
+Pause rate: {avg_pause_rate}/min  (elevated = cognitive load or scripted recall)
 Vocal energy (RMS): {avg_rms}
+Speech disfluency (um/uh/false starts): {disfluency_rate}/min  (elevated = fabrication cognitive load)
+Response latency — avg: {avg_latency}s  max: {max_latency}s  (>1.8s = deceptive recall; <0.8s = rehearsed)
 
-VOICE DECEPTION CLUES (by frequency)
+VOICE DECEPTION CLUES
 {voice_text}
+
+QUESTION COMPARATIVE ANALYSIS (z-scores vs session mean)
+{q_analysis}
 
 PEAK DECEPTION MOMENTS
 {', '.join(peak_strs) if peak_strs else 'None above threshold'}
