@@ -258,6 +258,80 @@ header {
 .gauge-fill::after { content:''; position:absolute; right:0; top:0; bottom:0; width:3px; background:white; opacity:0.7; filter:blur(1px); }
 .gauge-ticks { display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text); opacity:0.6; }
 
+/* ── Confidence band ─────────────────────────────────────── */
+.confidence-row { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:0.68rem; letter-spacing:0.1em; color:var(--text); }
+.confidence-badge { padding:2px 8px; border-radius:1px; font-weight:700; letter-spacing:0.12em; }
+.confidence-badge.HIGH   { background:var(--green-lo); color:var(--green); }
+.confidence-badge.MEDIUM { background:var(--amber-lo); color:var(--amber); }
+.confidence-badge.LOW    { background:var(--red-lo);   color:var(--red); }
+.confidence-range { color:var(--text-hi); font-family:var(--font-ui); }
+
+/* ── Header badges: liveness + session integrity ─────────── */
+.header-badges { display:flex; align-items:center; gap:10px; }
+.mini-badge {
+  display:flex; align-items:center; gap:6px; padding:4px 10px;
+  border:1px solid var(--border); font-size:0.68rem; letter-spacing:0.1em;
+  color:var(--text); cursor:default; position:relative;
+}
+.mini-badge .mb-dot { width:6px; height:6px; border-radius:50%; background:var(--text); flex-shrink:0; }
+.mini-badge.ok .mb-dot     { background:var(--green); }
+.mini-badge.warn .mb-dot   { background:var(--amber); }
+.mini-badge.bad .mb-dot    { background:var(--red); }
+.mini-badge:hover .mb-tooltip { display:block; }
+.mb-tooltip {
+  display:none; position:absolute; top:130%; right:0; width:260px;
+  background:var(--dark); border:1px solid var(--border); padding:10px 12px;
+  font-size:0.66rem; line-height:1.5; color:var(--text); letter-spacing:0.02em;
+  z-index:50; text-transform:none; box-shadow:0 4px 16px rgba(0,0,0,0.5);
+}
+
+/* ── Body language strip ─────────────────────────────────── */
+.body-strip {
+  background:#000; border-top:1px solid var(--border);
+  padding:8px 14px; display:grid; grid-template-columns:1fr 1px 1fr 1px 1fr;
+  flex-shrink:0; position:relative;
+}
+.body-strip::after { content:''; position:absolute; inset:0; pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent,transparent 8px,rgba(0,0,0,0.18) 8px,rgba(0,0,0,0.18) 9px); }
+.body-cell { display:flex; flex-direction:column; gap:2px; padding:0 10px; position:relative; z-index:1; }
+.body-cell:first-child { padding-left:0; }
+.body-cell:last-child  { padding-right:0; }
+.body-divider { background:var(--border); width:1px; margin:4px 0; position:relative; z-index:1; }
+.body-label { font-size:0.52rem; letter-spacing:0.18em; color:var(--text); opacity:0.45; font-family:var(--font-ui); }
+.body-value { font-size:0.85rem; font-family:var(--font-mono); color:var(--text-hi); line-height:1.1; }
+.body-unavailable { font-size:0.62rem; color:var(--text); opacity:0.35; letter-spacing:0.08em; padding:8px 14px; }
+
+/* ── Clue evidence (explainability) ──────────────────────── */
+.clue-card { cursor: pointer; }
+.clue-evidence {
+  display:none; margin-top:8px; padding-top:8px; border-top:1px solid var(--border);
+  font-size:0.66rem; font-family:var(--font-ui); color:var(--text); line-height:1.7;
+}
+.clue-evidence.open { display:block; }
+.clue-evidence-row { display:flex; justify-content:space-between; }
+.clue-evidence-row span:last-child { color:var(--text-hi); }
+.clue-expand-hint { font-size:0.58rem; letter-spacing:0.1em; color:var(--text); opacity:0.4; margin-top:4px; }
+
+/* ── New clue type colours ───────────────────────────────── */
+.clue-type.BODY      { background:rgba(176,127,255,0.10); color:var(--purple); }
+.clue-type.PERFUSION { background:rgba(232,75,53,0.12);   color:#ff7060; }
+
+/* ── Interview protocol panel ────────────────────────────── */
+.protocol-panel { border-top:1px solid var(--border); }
+.protocol-select {
+  background:var(--dark); border:1px solid var(--border); color:var(--text-hi);
+  font-family:var(--font-mono); font-size:0.68rem; padding:5px 8px; letter-spacing:0.05em;
+}
+.protocol-stage-list { padding:8px 16px; display:flex; flex-direction:column; gap:6px; max-height:140px; overflow-y:auto; }
+.protocol-stage { font-size:0.7rem; color:var(--text-hi); display:flex; gap:8px; }
+.protocol-stage-num { color:var(--purple); font-family:var(--font-ui); flex-shrink:0; }
+.protocol-stage-note { color:var(--text); font-size:0.64rem; opacity:0.7; }
+.followup-suggestion {
+  display:none; margin:8px 16px; padding:8px 12px; border:1px solid var(--amber-lo);
+  background:rgba(232,161,53,0.06); font-size:0.7rem; color:var(--amber); line-height:1.5;
+}
+.followup-suggestion.show { display:block; }
+
 /* Timeline */
 .timeline-section { padding:14px 20px; border-bottom:1px solid var(--border); }
 .timeline-label { font-size:0.65rem; letter-spacing:0.2em; color:var(--text); text-transform:uppercase; margin-bottom:9px; opacity:0.7; }
@@ -618,6 +692,18 @@ header {
     <div class="logo-sub">Facial Deception Analysis System</div>
   </div>
   <div class="header-right">
+    <div class="header-badges">
+      <div class="mini-badge" id="livenessBadge">
+        <div class="mb-dot"></div>
+        <span id="livenessLabel">LIVENESS —</span>
+        <div class="mb-tooltip" id="livenessTooltip">Liveness is a heuristic advisory signal (cardiac pulse presence, blink naturalness, image texture) — it is NOT a trained deepfake classifier. Treat a low score as a prompt for manual visual confirmation, not an automated rejection.</div>
+      </div>
+      <div class="mini-badge" id="integrityBadge">
+        <div class="mb-dot"></div>
+        <span id="integrityLabel">SESSION —</span>
+        <div class="mb-tooltip" id="integrityTooltip">Each frame's feature data is sealed into a SHA-256 hash chain as it's captured. This proves the session log was not edited after capture — it does not make VERITY output legally admissible evidence.</div>
+      </div>
+    </div>
     <div class="status-pill">
       <div class="status-dot" id="sysStatus"></div>
       <span id="sysLabel">OFFLINE</span>
@@ -758,6 +844,25 @@ header {
         </div>
 
       </div>
+
+      <!-- Body language strip (MediaPipe Pose — optional, best-effort) -->
+      <div class="body-strip" id="bodyStrip" style="display:none">
+        <div class="body-cell">
+          <div class="body-label">HAND-TO-FACE</div>
+          <div class="body-value" id="bodyH2F" style="color:var(--green)">—</div>
+        </div>
+        <div class="body-divider"></div>
+        <div class="body-cell">
+          <div class="body-label">POSTURE</div>
+          <div class="body-value" id="bodyPosture" style="color:var(--green)">NEUTRAL</div>
+        </div>
+        <div class="body-divider"></div>
+        <div class="body-cell">
+          <div class="body-label">FIDGET</div>
+          <div class="body-value" id="bodyFidget" style="color:var(--green)">—</div>
+        </div>
+      </div>
+      <div class="body-unavailable" id="bodyUnavailable" style="display:none">BODY LANGUAGE TRACKING UNAVAILABLE (optional channel)</div>
     </div>
 
     <div class="right-panel">
@@ -770,6 +875,11 @@ header {
         </div>
         <div class="gauge-track"><div class="gauge-fill" id="gaugeFill"></div></div>
         <div class="gauge-ticks"><span>0%</span><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+        <div class="confidence-row" id="confidenceRow">
+          <span>CONFIDENCE</span>
+          <span class="confidence-badge MEDIUM" id="confBadge">—</span>
+          <span class="confidence-range" id="confRange">range —</span>
+        </div>
       </div>
 
       <div class="timeline-section">
@@ -796,6 +906,22 @@ header {
       <div class="q-section" id="qSection" style="border-top:1px solid var(--border)">
         <div class="q-section-title">QUESTION SEGMENTS — press ◈ MARK QUESTION before each</div>
         <div id="qList"><div class="q-empty">No questions marked yet</div></div>
+      </div>
+
+      <!-- Interview protocol panel -->
+      <div class="protocol-panel" id="protocolPanel">
+        <div class="clues-header">
+          <div class="section-label">◈ INTERVIEW PROTOCOL</div>
+          <select class="protocol-select" id="protocolSelect" onchange="renderProtocol()">
+            <option value="">None</option>
+            <option value="peace">PEACE Model</option>
+            <option value="cognitive_interview">Cognitive Interview</option>
+          </select>
+        </div>
+        <div class="protocol-stage-list" id="protocolStages">
+          <div class="q-empty">Select a protocol to see structured stages</div>
+        </div>
+        <div class="followup-suggestion" id="followupSuggestion"></div>
       </div>
 
       <!-- AI Analysis panel — opens full-screen modal report -->
@@ -1301,6 +1427,7 @@ async function markQuestion() {
   const res  = await fetch('/mark_question', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
     const data = await res.json();
     if (data.status === 'ok') {
+      currentQuestionNum = data.question;
       btn.textContent = `◈ Q${data.question} MARKED`;
       setTimeout(() => { btn.textContent = '◈ MARK QUESTION'; btn.disabled = false; }, 2000);
     } else {
@@ -1419,6 +1546,8 @@ function initSpeechRecognition() {
         const t = ev.results[i][0].transcript;
         const fillers = (t.match(FILLER_RE) || []).length;
         disfluencyCount += fillers; totalDisfluency += fillers;
+        // Send full transcript text for content/contradiction analysis
+        submitTranscript(t);
       }
     }
   };
@@ -1428,6 +1557,15 @@ function initSpeechRecognition() {
 function startSpeechRec() { if (speechRec) try { speechRec.start(); } catch(_){} }
 function stopSpeechRec()  { if (speechRec) try { speechRec.stop();  } catch(_){} }
 function drainDisfluency() { const v = disfluencyCount; disfluencyCount = 0; return v; }
+
+function submitTranscript(text) {
+  if (!text || !text.trim()) return;
+  fetch('/submit_transcript', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ text, question: currentQuestionNum })
+  }).catch(() => {});
+}
+let currentQuestionNum = 0;   // tracks which question transcript text should attach to
 
 // ── Response latency tracker ───────────────────────────────────
 let _qMarkTime = null, _lastLatency = 0;
@@ -1584,6 +1722,7 @@ async function captureAndAnalyse() {
       af.disfluency_count = drainDisfluency();
       // Response latency (seconds from MARK QUESTION to first speech)
       af.response_latency = af.speaking ? checkLatency(true) : 0;
+      if (af.response_latency > 0) checkFollowupTrigger(af.response_latency, 0);
       // LPC formants
       if (analyser) {
         const fb = new Float32Array(analyser.fftSize);
@@ -1611,6 +1750,133 @@ async function captureAndAnalyse() {
     setStatus('warning', 'NETWORK ERROR');
     console.warn('[VERITY] Fetch error:', e);
   }
+}
+
+// ── Confidence band ──────────────────────────────────────────
+function updateConfidenceUI(conf) {
+  const badge = document.getElementById('confBadge');
+  const range = document.getElementById('confRange');
+  if (!badge || !conf) return;
+  const label = conf.label || 'MEDIUM';
+  badge.className = 'confidence-badge ' + label;
+  badge.textContent = label;
+  range.textContent = `range ${conf.low ?? '—'}%–${conf.high ?? '—'}% · signal ${Math.round((conf.signal_quality||0)*100)}%`;
+}
+
+// ── Liveness badge (heuristic — advisory only) ───────────────
+function updateLivenessUI(liveness) {
+  const badge = document.getElementById('livenessBadge');
+  const lbl   = document.getElementById('livenessLabel');
+  if (!badge || !liveness) return;
+  const score = liveness.score ?? 1.0;
+  badge.classList.remove('ok','warn','bad');
+  if (score > 0.75)      { badge.classList.add('ok');   lbl.textContent = 'LIVENESS OK'; }
+  else if (score > 0.5)  { badge.classList.add('warn'); lbl.textContent = 'LIVENESS CHECK'; }
+  else                   { badge.classList.add('bad');  lbl.textContent = 'LIVENESS LOW'; }
+}
+
+// ── Session integrity badge ──────────────────────────────────
+function updateIntegrityUI(integrity) {
+  const badge = document.getElementById('integrityBadge');
+  const lbl   = document.getElementById('integrityLabel');
+  if (!badge || !integrity) return;
+  badge.classList.remove('ok','warn');
+  if (integrity.frames_sealed > 0) {
+    badge.classList.add('ok');
+    lbl.textContent = `SEALED · ${integrity.frames_sealed}f · ${(integrity.chain_hash||'').substring(0,8)}`;
+  } else {
+    lbl.textContent = 'SESSION —';
+  }
+}
+
+// ── Body language (MediaPipe Pose — optional, best-effort) ───
+function updateBodyUI(body) {
+  const strip = document.getElementById('bodyStrip');
+  const unavailable = document.getElementById('bodyUnavailable');
+  if (!body) {
+    // Don't immediately flip to "unavailable" on a single missed frame —
+    // only show it once we've run a few seconds without any pose data.
+    return;
+  }
+  strip.style.display = 'grid';
+  unavailable.style.display = 'none';
+
+  const h2fEl = document.getElementById('bodyH2F');
+  const postureEl = document.getElementById('bodyPosture');
+  const fidgetEl = document.getElementById('bodyFidget');
+
+  if (body.hand_to_face < 0.35) {
+    h2fEl.textContent = 'CONTACT'; h2fEl.style.color = 'var(--amber)';
+  } else {
+    h2fEl.textContent = 'CLEAR'; h2fEl.style.color = 'var(--green)';
+  }
+
+  if (body.arm_cross > 0.5) {
+    postureEl.textContent = 'DEFENSIVE'; postureEl.style.color = 'var(--amber)';
+  } else {
+    postureEl.textContent = 'OPEN'; postureEl.style.color = 'var(--green)';
+  }
+
+  const fidget = body.fidget_score || 0;
+  fidgetEl.textContent = fidget.toFixed(1);
+  fidgetEl.style.color = fidget > 3.5 ? 'var(--amber)' : 'var(--green)';
+}
+
+// ── Adaptive follow-up suggestion ────────────────────────────
+// Simple rule-based trigger (not ML): when disfluency or latency spikes
+// noticeably above the session's own running average, suggest a probe
+// from the protocol library. This is a heuristic prompt for the examiner,
+// not an automated decision.
+let _latencySamples = [], _disfluencySamples = [];
+const FOLLOWUP_PROBES = [
+  "Tell me that again, but starting from the end and working backwards.",
+  "Can you describe that in even more detail than before?",
+  "What were you looking at, specifically, at that moment?",
+  "Who else was present, and where exactly were they standing?",
+  "What happened immediately before that?",
+  "If I asked someone else who was there, what would they tell me?",
+];
+function checkFollowupTrigger(latency, disfluencyRate) {
+  const box = document.getElementById('followupSuggestion');
+  if (!box) return;
+  if (latency > 0) _latencySamples.push(latency);
+  if (_latencySamples.length > 30) _latencySamples.shift();
+  if (disfluencyRate > 0) _disfluencySamples.push(disfluencyRate);
+  if (_disfluencySamples.length > 30) _disfluencySamples.shift();
+
+  const avgLat = _latencySamples.length > 3 ? _latencySamples.reduce((a,b)=>a+b,0)/_latencySamples.length : 0;
+  const spike = avgLat > 0 && latency > avgLat * 1.8 && latency > 1.5;
+
+  if (spike) {
+    const probe = FOLLOWUP_PROBES[Math.floor(Math.random()*FOLLOWUP_PROBES.length)];
+    box.textContent = `⚡ Signal spike detected — suggested follow-up: "${probe}"`;
+    box.classList.add('show');
+    setTimeout(() => box.classList.remove('show'), 8000);
+  }
+}
+
+// ── Interview protocol panel ─────────────────────────────────
+let _protocolData = null;
+async function loadProtocols() {
+  try {
+    const res = await fetch('/protocols');
+    _protocolData = await res.json();
+  } catch(e) { console.warn('[VERITY] Could not load protocols:', e); }
+}
+function renderProtocol() {
+  const sel = document.getElementById('protocolSelect');
+  const list = document.getElementById('protocolStages');
+  const key = sel.value;
+  if (!key || !_protocolData || !_protocolData[key]) {
+    list.innerHTML = '<div class="q-empty">Select a protocol to see structured stages</div>';
+    return;
+  }
+  const proto = _protocolData[key];
+  list.innerHTML = proto.stages.map((s, i) => `
+    <div class="protocol-stage">
+      <span class="protocol-stage-num">${i+1}</span>
+      <span>${s.stage}<div class="protocol-stage-note">${s.note}</div></span>
+    </div>`).join('');
 }
 
 function updateLiveUI(data) {
@@ -1651,6 +1917,10 @@ function updateLiveUI(data) {
   updateHrUI(data.hr || {});
   updateGazeUI(data.gaze || {});
   updateRespUI(data.resp_rate || 0);
+  updateConfidenceUI(data.confidence);
+  updateLivenessUI(data.liveness);
+  updateIntegrityUI(data.integrity);
+  updateBodyUI(data.body);
   updateQuestionTimeline(data.question_summaries || {}, data.question_current || 0);
 
   // Session log for AI analysis — rolling 5-min window (sampled at ~8fps = ~2400 max)
@@ -1893,15 +2163,31 @@ function updateClues(clues) {
     log.innerHTML = `<div class="no-clues"><span>⬡</span><span>NO DECEPTION INDICATORS</span></div>`;
     return;
   }
-  log.innerHTML = clues.map(c => `
-    <div class="clue-card ${c.severity}">
+  log.innerHTML = clues.map((c, i) => {
+    const evidenceId = `clue-ev-${i}`;
+    let evidenceHtml = '';
+    if (c.evidence) {
+      const rows = Object.entries(c.evidence).slice(0, 8).map(([k,v]) =>
+        `<div class="clue-evidence-row"><span>${k}</span><span>${v}</span></div>`).join('');
+      evidenceHtml = `<div class="clue-evidence" id="${evidenceId}">${rows}<div style="margin-top:4px;opacity:0.5">frame ${c.frame ?? '—'}</div></div>
+        <div class="clue-expand-hint">click to ${c.evidence ? 'inspect raw evidence' : ''}</div>`;
+    }
+    return `
+    <div class="clue-card ${c.severity}" onclick="toggleClueEvidence('${evidenceId}')">
       <div class="clue-top">
         <span class="clue-type ${c.type}">${c.type}</span>
         <span class="clue-label">${c.label}</span>
         <span class="severity-badge ${c.severity}">${c.severity}</span>
       </div>
       <div class="clue-detail">${c.detail}</div>
-    </div>`).join('');
+      ${evidenceHtml}
+    </div>`;
+  }).join('');
+}
+
+function toggleClueEvidence(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
 }
 
 function drawOverlay(data) {
@@ -1982,6 +2268,20 @@ function renderAIReport(report) {
     document.getElementById('rptVoice').textContent = report.voice_summary;
     vBlock.style.display = '';
   } else { vBlock.style.display = 'none'; }
+
+  const cBlock = document.getElementById('rptContentBlock');
+  if (report.content_analysis) {
+    document.getElementById('rptContent').textContent = report.content_analysis;
+    cBlock.style.display = '';
+  } else { cBlock.style.display = 'none'; }
+
+  const contraBlock = document.getElementById('rptContradictionsBlock');
+  const contras = report.contradictions || [];
+  if (contras.length) {
+    document.getElementById('rptContradictions').innerHTML = contras
+      .map(c => `<div class="rpt-finding">${c}</div>`).join('');
+    contraBlock.style.display = '';
+  } else { contraBlock.style.display = 'none'; }
 
   document.getElementById('rptExaminer').textContent = report.examiner_note || '';
   document.getElementById('rptFooter').textContent =
@@ -2382,6 +2682,7 @@ function formatTime(s) {
 
 // Boot
 initUI();
+loadProtocols();
 </script>
 <!-- ═══════════════════════════════════════════════════
      Full-screen forensic report modal
@@ -2425,6 +2726,16 @@ initUI();
     <div class="rpt-block" id="rptVoiceBlock">
       <div class="rpt-block-title">VOICE ANALYSIS</div>
       <div class="rpt-block-body"><div class="rpt-voice" id="rptVoice"></div></div>
+    </div>
+
+    <div class="rpt-block" id="rptContentBlock">
+      <div class="rpt-block-title">STATEMENT CONTENT ANALYSIS (CBCA-INSPIRED)</div>
+      <div class="rpt-block-body"><div class="rpt-voice" id="rptContent"></div></div>
+    </div>
+
+    <div class="rpt-block" id="rptContradictionsBlock">
+      <div class="rpt-block-title">CROSS-QUESTION CONTRADICTIONS</div>
+      <div class="rpt-block-body"><div class="rpt-findings" id="rptContradictions"></div></div>
     </div>
 
     <div class="rpt-block">
