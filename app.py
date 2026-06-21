@@ -77,6 +77,55 @@ def get_landmarker():
     return _face_landmarker
 
 # ──────────────────────────────────────────────────────────
+# Pose landmarker (body language: hands, shoulders, posture)
+# Optional channel — entirely best-effort. If the model can't be
+# downloaded or loaded (e.g. memory pressure on free-tier hosting),
+# body-language tracking silently disables itself; every other
+# channel is unaffected.
+# ──────────────────────────────────────────────────────────
+_POSE_MODEL_URL  = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+)
+_POSE_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pose_landmarker_lite.task")
+_pose_landmarker  = None
+_pose_unavailable = False   # set True after first failure — stop retrying every frame
+
+def _ensure_pose_model():
+    if os.path.exists(_POSE_MODEL_PATH) and os.path.getsize(_POSE_MODEL_PATH) > 500_000:
+        return True
+    try:
+        print("[VERITY] Downloading PoseLandmarker model (~5 MB)…", flush=True)
+        urllib.request.urlretrieve(_POSE_MODEL_URL, _POSE_MODEL_PATH)
+        return True
+    except Exception as exc:
+        print(f"[VERITY] Pose model download failed (body language disabled): {exc}", flush=True)
+        return False
+
+def get_pose_landmarker():
+    global _pose_landmarker, _pose_unavailable
+    if _pose_unavailable:
+        return None
+    if _pose_landmarker is None:
+        try:
+            if not _ensure_pose_model():
+                _pose_unavailable = True
+                return None
+            opts = _mp_vision.PoseLandmarkerOptions(
+                base_options=_mp_python.BaseOptions(model_asset_path=_POSE_MODEL_PATH),
+                running_mode=_mp_vision.RunningMode.IMAGE,
+                num_poses=1,
+                min_pose_detection_confidence=0.5,
+                min_pose_presence_confidence=0.5,
+            )
+            _pose_landmarker = _mp_vision.PoseLandmarker.create_from_options(opts)
+        except Exception as exc:
+            print(f"[VERITY] Pose landmarker init failed (body language disabled): {exc}", flush=True)
+            _pose_unavailable = True
+            return None
+    return _pose_landmarker
+
+# ──────────────────────────────────────────────────────────
 # Ekman-derived landmark regions (MediaPipe 468-point mesh)
 # ──────────────────────────────────────────────────────────
 # Source: Ekman Ch.11 "Facial Deceit" — morphology analysis focuses on:
@@ -139,6 +188,29 @@ latency_current      = 0.0           # most recent response latency (seconds)
 
 # ── Respiration proxy (low-freq rPPG component) ──────────
 resp_history    = deque(maxlen=60)    # breaths/min estimates
+
+# ── Body language (MediaPipe Pose, best-effort) ───────────
+body_history       = deque(maxlen=HISTORY_LEN)   # {hand_to_face, arm_cross, shoulder_tilt, fidget}
+wrist_pos_history  = deque(maxlen=45)            # for fidget variance calculation
+
+# ── Multi-region perfusion (extends rPPG forehead-only) ────
+perfusion_baseline = {}     # {region: mean_green_norm} captured at SET BASELINE
+perfusion_history   = deque(maxlen=60)
+
+# ── Session integrity (tamper-evident hash chain) ──────────
+import hashlib
+session_hash_chain = []     # list of {frame, t, hash}
+session_chain_seed  = None  # random seed set at session start / reset
+
+# ── Question transcripts (for CBCA / contradiction analysis) ─
+question_transcripts = {}   # {question_num: accumulated transcript text}
+
+# ── Signal quality / confidence calibration ────────────────
+signal_quality_history = deque(maxlen=30)  # rolling frame-quality scores 0-1
+
+# ── Liveness heuristic (advisory only — NOT a trained deepfake
+# classifier; see /health endpoint notes) ──────────────────
+liveness_history = deque(maxlen=60)
 
 # ── Voice state ───────────────────────────────────────────
 VOICE_HISTORY_LEN = 90          # ~11s at one sample per 120ms (extended for pause analysis)
@@ -316,15 +388,12 @@ def extract_features(landmarks, w, h):
     # Genuine emotions are symmetric; managed/posed expressions often asymmetric
     brow_l_raw = angle_of_lift(landmarks, 107, 33,  w, h)
     brow_r_raw = angle_of_lift(landmarks, 336, 263, w, h)
-    brow_mean  = max(abs(brow_l_raw + brow_r_raw) / 2, 0.001)
-    brow_asymmetry  = float(abs(brow_l_raw - brow_r_raw) / brow_mean)
+    brow_mean  = max(abs(brow_l_raw) + abs(brow_r_raw), 0.001) / 2
+    brow_asymmetry  = float(np.clip(abs(brow_l_raw - brow_r_raw) / brow_mean, 0, 3.0))
 
     eye_mean   = max((eye_open_L + eye_open_R) / 2, 0.001)
-    eye_asymmetry   = float(abs(eye_open_L - eye_open_R) / eye_mean)
+    eye_asymmetry   = float(np.clip(abs(eye_open_L - eye_open_R) / eye_mean, 0, 3.0))
 
-    cheek_l_raw = angle_of_lift(landmarks, 116, 145, w, h)
-    cheek_r_raw = angle_of_lift(landmarks, 345, 374, w, h)
-    cheek_mean  = max(abs(cheek_l_raw + cheek_r_raw) / 2, 0.001)
     mouth_asym_l = float(nose_tip[1] - mouth_L[1])
     mouth_asym_r = float(nose_tip[1] - mouth_R[1])
     mouth_asymmetry = norm(abs(mouth_asym_l - mouth_asym_r))
@@ -776,6 +845,19 @@ def analyse_deception(features, emotions, history_features, history_times):
     }
 
 
+# Literature-based population norms — used only as a fallback when no
+# personal baseline exists yet (e.g. first-contact subject, no SET BASELINE
+# performed). Personal baselines are always preferred when available since
+# individual variation is large; this fallback exists so VERITY still
+# produces *some* signal rather than none in a single-shot session.
+# Sources: Vrij (2008) "Detecting Lies and Deceit"; general clinical voice norms.
+POPULATION_VOICE_NORMS = {
+    "pitch":         150.0,   # midpoint of male/female adult speech range
+    "jitter":        0.008,   # ~0.8%, typical healthy speech
+    "syllable_rate": 4.0,
+    "pause_rate":    1.5,
+}
+
 def analyse_voice_deception(af, history, baseline):
     """
     Vocal deception indicators — all features computed browser-side (Web Audio API).
@@ -787,9 +869,15 @@ def analyse_voice_deception(af, history, baseline):
       4. Speech rate change  — syllable rate deviation (slower=fabricating, faster=rehearsed)
       5. Vocal energy drop   — RMS well below baseline (suppressed/controlled affect)
       6. Cross-question      — this segment's profile vs session mean (strongest signal)
+
+    If no personal baseline is set, falls back to literature-based population
+    norms (POPULATION_VOICE_NORMS) with explicitly reduced confidence — see
+    is_population_fallback in the returned clue list.
     """
     clues      = []
     components = []
+    using_population_norms = not bool(baseline)
+    effective_baseline = baseline if baseline else POPULATION_VOICE_NORMS
 
     pitch         = af.get("pitch",         0.0)
     rms           = af.get("rms",           0.0)
@@ -805,18 +893,25 @@ def analyse_voice_deception(af, history, baseline):
               if h.get("speaking") and h.get("pitch", 0) > 60]
 
     # ── 1. Pitch elevation ────────────────────────────────
-    if baseline.get("pitch", 0) > 60:
-        ratio = pitch / baseline["pitch"]
-        if ratio > 1.12:
-            components.append(min((ratio - 1.0) * 4, 0.80))
+    if effective_baseline.get("pitch", 0) > 60:
+        ratio = pitch / effective_baseline["pitch"]
+        # Population-norm fallback needs a higher bar before flagging —
+        # individual variation alone can easily produce a 12% deviation
+        # from a generic midpoint that means nothing for THIS person.
+        threshold = 1.12 if not using_population_norms else 1.30
+        if ratio > threshold:
+            weight_cap = 0.80 if not using_population_norms else 0.45
+            components.append(min((ratio - 1.0) * 4, weight_cap))
+            note = "" if not using_population_norms else " (vs. population norm — no personal baseline set; lower confidence)"
             clues.append({
                 "type":     "VOICE",
                 "label":    "Elevated Pitch",
-                "detail":   (f"Vocal F0 {int((ratio-1)*100)}% above baseline — pitch "
+                "detail":   (f"Vocal F0 {int((ratio-1)*100)}% above baseline{note} — pitch "
                              f"elevation under stress is one of the most replicated "
                              f"voice-deception markers (Vrij 2008; DePaulo et al. 2003)"),
-                "severity": "HIGH" if ratio > 1.20 else "MEDIUM",
+                "severity": "HIGH" if (ratio > 1.20 and not using_population_norms) else "MEDIUM",
             })
+    baseline = effective_baseline  # downstream code in this function uses `baseline`
 
     # ── 2. Jitter elevation ───────────────────────────────
     # Jitter = frame-to-frame pitch period variation / mean period.
@@ -993,6 +1088,308 @@ def compute_baseline_sigma(features_list):
 
 
 # ──────────────────────────────────────────────────────────
+# Body language (MediaPipe Pose) — best-effort secondary channel
+# Pose indices: 11=L shoulder, 12=R shoulder, 15=L wrist, 16=R wrist,
+#               0=nose. Coordinates are normalised [0,1] image-space.
+# ──────────────────────────────────────────────────────────
+
+def extract_body_features(pose_landmarks, w, h):
+    """Extract hand-to-face, arm-cross, shoulder tilt, and fidget signals.
+    Returns None if landmarks are insufficient (e.g. hands out of frame)."""
+    try:
+        lm = pose_landmarks
+        nose      = np.array([lm[0].x  * w, lm[0].y  * h])
+        l_shoulder= np.array([lm[11].x * w, lm[11].y * h])
+        r_shoulder= np.array([lm[12].x * w, lm[12].y * h])
+        l_wrist   = np.array([lm[15].x * w, lm[15].y * h])
+        r_wrist   = np.array([lm[16].x * w, lm[16].y * h])
+
+        shoulder_width = max(float(np.linalg.norm(l_shoulder - r_shoulder)), 1.0)
+
+        # Hand-to-face distance (self-soothing gesture indicator)
+        l_h2f = float(np.linalg.norm(l_wrist - nose)) / shoulder_width
+        r_h2f = float(np.linalg.norm(r_wrist - nose)) / shoulder_width
+        hand_to_face = min(l_h2f, r_h2f)   # closest hand
+
+        # Arm-cross proxy: wrist crosses to the opposite side of the body midline
+        midline_x = (l_shoulder[0] + r_shoulder[0]) / 2
+        l_crossed = l_wrist[0] > midline_x   # left wrist past the right side
+        r_crossed = r_wrist[0] < midline_x
+        arm_cross = float(l_crossed or r_crossed)
+
+        # Shoulder tilt (postural asymmetry / tension)
+        shoulder_tilt = float(abs(l_shoulder[1] - r_shoulder[1])) / shoulder_width
+
+        return {
+            "hand_to_face":  round(hand_to_face, 4),
+            "arm_cross":     arm_cross,
+            "shoulder_tilt": round(shoulder_tilt, 4),
+            "wrist_x":       round(float((l_wrist[0] + r_wrist[0]) / 2), 2),
+            "wrist_y":       round(float((l_wrist[1] + r_wrist[1]) / 2), 2),
+        }
+    except Exception:
+        return None
+
+
+def compute_fidget_score(wrist_history):
+    """Variance of wrist position over a rolling window — proxy for fidgeting."""
+    if len(wrist_history) < 8:
+        return 0.0
+    xs = [w["wrist_x"] for w in wrist_history]
+    ys = [w["wrist_y"] for w in wrist_history]
+    return round(float(np.std(xs) + np.std(ys)), 2)
+
+
+def analyse_body_deception(body_feat, fidget_score, baseline_body):
+    """Generate BODY clues from posture/gesture signals. Advisory weight —
+    body language is the least individually-reliable channel (Reid Technique
+    literature treats it as supporting evidence only, never primary)."""
+    clues = []
+    if not body_feat:
+        return clues
+
+    h2f_baseline = baseline_body.get("hand_to_face", 1.0) if baseline_body else 1.0
+
+    if body_feat["hand_to_face"] < 0.35:
+        clues.append({
+            "type": "BODY",
+            "label": "Hand-to-Face Contact",
+            "detail": "Hand positioned near face/mouth — classic self-soothing gesture under cognitive load. Supporting signal only; common in relaxed conversation too.",
+            "severity": "LOW",
+        })
+
+    if body_feat["arm_cross"] > 0.5:
+        clues.append({
+            "type": "BODY",
+            "label": "Defensive Arm Posture",
+            "detail": "Arms crossed/closed posture detected — associated with psychological distancing or discomfort in behavioural-analyst literature.",
+            "severity": "LOW",
+        })
+
+    if fidget_score > 3.5:
+        clues.append({
+            "type": "BODY",
+            "label": "Elevated Fidgeting",
+            "detail": f"Hand/wrist position variance {fidget_score} — restlessness consistent with anxiety or discomfort. Most diagnostic when onset correlates with a specific question.",
+            "severity": "MEDIUM",
+        })
+
+    if body_feat["shoulder_tilt"] > 0.12:
+        clues.append({
+            "type": "BODY",
+            "label": "Postural Asymmetry",
+            "detail": "Shoulder tilt detected — may indicate physical tension or an evasive postural shift.",
+            "severity": "LOW",
+        })
+
+    return clues
+
+
+# ──────────────────────────────────────────────────────────
+# Multi-region perfusion mapping (extends single-ROI rPPG)
+# Regions: forehead (existing), nose, left cheek, right cheek, chin
+# ──────────────────────────────────────────────────────────
+
+def extract_region_rgb(frame, lms, w, h, center_idx, size_frac, iod):
+    """Generic ROI colour extractor — same approach as extract_forehead_rgb
+    but parameterised by a centre landmark, for reuse across face regions."""
+    try:
+        cx = int(lms[center_idx].x * w)
+        cy = int(lms[center_idx].y * h)
+        half = max(int(iod * size_frac / 2), 4)
+        x0, x1 = max(cx - half, 0), min(cx + half, w)
+        y0, y1 = max(cy - half, 0), min(cy + half, h)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        roi = frame[y0:y1, x0:x1]
+        if roi.size == 0:
+            return None
+        b, g, r = float(np.mean(roi[:, :, 0])), float(np.mean(roi[:, :, 1])), float(np.mean(roi[:, :, 2]))
+        total = max(r + g + b, 1.0)
+        return g / total
+    except Exception:
+        return None
+
+
+def compute_perfusion_map(frame, lms, w, h, iod):
+    """Sample green-channel-normalised colour at 4 facial regions.
+    Returns dict of region -> g_norm, or {} on failure."""
+    regions = {
+        "nose":       4,     # nose tip
+        "cheek_left": 117,
+        "cheek_right":346,
+        "chin":       152,
+    }
+    out = {}
+    for name, idx in regions.items():
+        val = extract_region_rgb(frame, lms, w, h, idx, 0.6, iod)
+        if val is not None:
+            out[name] = round(val, 5)
+    return out
+
+
+def analyse_perfusion_deception(perfusion_now, perfusion_baseline_local):
+    """Compare current regional perfusion against personal baseline.
+    Nose blanching = fear/flight response; cheek flushing = embarrassment/anger."""
+    clues = []
+    if not perfusion_baseline_local or not perfusion_now:
+        return clues
+
+    nose_bl = perfusion_baseline_local.get("nose")
+    nose_now = perfusion_now.get("nose")
+    if nose_bl and nose_now is not None and nose_bl > 0:
+        delta = (nose_now - nose_bl) / nose_bl
+        if delta < -0.06:   # blanching = relative green-channel drop
+            clues.append({
+                "type": "PERFUSION",
+                "label": "Nasal Blanching",
+                "detail": f"Nose region perfusion {abs(delta)*100:.1f}% below baseline — consistent with peripheral vasoconstriction under fear/flight response.",
+                "severity": "MEDIUM",
+            })
+
+    for side in ["cheek_left", "cheek_right"]:
+        bl = perfusion_baseline_local.get(side)
+        now = perfusion_now.get(side)
+        if bl and now is not None and bl > 0:
+            delta = (now - bl) / bl
+            if delta > 0.08:
+                clues.append({
+                    "type": "PERFUSION",
+                    "label": "Facial Flushing",
+                    "detail": f"{side.replace('_',' ').title()} perfusion {delta*100:.1f}% above baseline — consistent with embarrassment, anger, or autonomic arousal.",
+                    "severity": "MEDIUM",
+                })
+                break   # report once, not per-cheek
+
+    return clues
+
+
+# ──────────────────────────────────────────────────────────
+# Liveness heuristic — ADVISORY ONLY.
+# This is NOT a trained deepfake/spoof classifier. It combines three
+# cheap, explainable signals that are individually weak but jointly
+# suggestive of a non-live or synthetic feed. A low score should
+# prompt manual visual confirmation by the examiner, not an automated
+# rejection.
+# ──────────────────────────────────────────────────────────
+
+def compute_liveness_score(frame, rppg_quality, blink_rate, frames_seen):
+    """Returns (score 0-1, reasons[]) — higher = more confidence the
+    feed is a live, unmodified camera capture."""
+    reasons = []
+    signals = []
+
+    # 1. rPPG presence — synthetic/replayed video rarely reproduces a
+    #    coherent cardiac-band signal at consistent quality.
+    if frames_seen > 60:   # only judge once buffers have had time to fill
+        if rppg_quality > 0.25:
+            signals.append(1.0)
+        else:
+            signals.append(0.3)
+            reasons.append("Weak or absent cardiac pulse signal")
+    else:
+        signals.append(0.7)  # neutral — not enough data yet
+
+    # 2. Blink naturalness — zero blinks over an extended window, or an
+    #    unnaturally mechanical/periodic rate, is a mild flag.
+    if frames_seen > 150:
+        if blink_rate <= 0:
+            signals.append(0.4)
+            reasons.append("No blinks detected over extended window")
+        elif blink_rate > 60:
+            signals.append(0.6)
+            reasons.append("Unusually high blink rate")
+        else:
+            signals.append(1.0)
+    else:
+        signals.append(0.8)
+
+    # 3. Image texture sharpness (Laplacian variance) — extremely low
+    #    variance can indicate a smoothed/generated or low-quality
+    #    reproduced source rather than a live camera sensor.
+    try:
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        if lap_var < 8.0:
+            signals.append(0.5)
+            reasons.append("Unusually low image texture detail")
+        else:
+            signals.append(1.0)
+    except Exception:
+        signals.append(0.8)
+
+    score = float(np.mean(signals))
+    return round(score, 3), reasons
+
+
+# ──────────────────────────────────────────────────────────
+# Confidence calibration — reports an honest reliability band
+# instead of a single falsely-precise percentage.
+# ──────────────────────────────────────────────────────────
+
+def compute_signal_quality(face_detected, rppg_quality, voice_active, mic_rms, blink_rate, frames_seen):
+    """Aggregate signal quality 0-1 across active channels.
+    Missing/degraded channels reduce confidence proportionally."""
+    components = []
+    if face_detected:
+        components.append(1.0)
+    else:
+        components.append(0.0)
+
+    # rPPG only counted once buffers have filled
+    if frames_seen > 60:
+        components.append(min(rppg_quality * 1.6, 1.0))
+
+    if voice_active:
+        components.append(min(mic_rms * 12, 1.0) if mic_rms else 0.3)
+    # if mic inactive, voice channel simply doesn't contribute (not penalised —
+    # examiner may legitimately be running video-only)
+
+    if blink_rate > 0:
+        components.append(1.0)
+
+    return float(np.clip(np.mean(components) if components else 0.5, 0.0, 1.0))
+
+
+def compute_confidence_band(deception_score, signal_quality, n_active_clues):
+    """Returns (low, high, label) — a score range and qualitative confidence
+    label, replacing a single misleadingly precise percentage."""
+    # Lower signal quality and fewer corroborating clues widen the band
+    base_width = (1.0 - signal_quality) * 25      # up to ±25 points from quality alone
+    clue_tighten = min(n_active_clues * 2.0, 10)   # more independent clues narrows the band
+    half_width = max(base_width - clue_tighten, 4.0)   # never below ±4
+
+    pct = deception_score * 100
+    low  = max(pct - half_width, 0)
+    high = min(pct + half_width, 100)
+
+    if signal_quality > 0.75 and n_active_clues >= 2:
+        label = "HIGH"
+    elif signal_quality > 0.45:
+        label = "MEDIUM"
+    else:
+        label = "LOW"
+
+    return round(low, 1), round(high, 1), label
+
+
+# ──────────────────────────────────────────────────────────
+# Session integrity — tamper-evident hash chain.
+# Each frame's rounded feature vector + timestamp is hashed into a
+# running chain. This does NOT make VERITY output admissible as legal
+# evidence; it allows a reviewer to verify a session log was not
+# edited after capture.
+# ──────────────────────────────────────────────────────────
+
+def chain_frame_hash(prev_hash, frame_num, timestamp, feature_snapshot):
+    payload = json.dumps({
+        "prev": prev_hash, "frame": frame_num, "t": round(timestamp, 3),
+        "f": {k: round(v, 4) if isinstance(v, float) else v for k, v in feature_snapshot.items()},
+    }, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+# ──────────────────────────────────────────────────────────
 # Main analysis pipeline
 # ──────────────────────────────────────────────────────────
 
@@ -1161,6 +1558,7 @@ def analyse_hr_deception(bpm, quality, history, baseline_bpm, current_deception_
 def process_frame(img_bytes, audio_features=None):
     global frame_count, baseline_features, emotion_ema
     global last_eye_open, blink_rate_30s, latency_current
+    global perfusion_baseline, session_hash_chain, session_chain_seed
 
     # Decode image
     nparr  = np.frombuffer(base64.b64decode(img_bytes), np.uint8)
@@ -1181,14 +1579,16 @@ def process_frame(img_bytes, audio_features=None):
     lms      = detection.face_landmarks[0]   # list of NormalizedLandmark (same .x/.y/.z)
     features = extract_features(lms, w, h)
 
+    # Inter-ocular distance — needed by rPPG, perfusion mapping, and liveness checks
+    iod_dist = max(math.dist(
+        [lms[33].x * w,  lms[33].y * h],
+        [lms[263].x * w, lms[263].y * h]
+    ), 1.0)
+
     # ── rPPG: extract forehead colour signal ──────────────
     # Wrapped in try/except — rPPG must never prevent face analysis from completing
     hr_result = {"bpm": 0.0, "quality": 0.0, "hr_score": 0.0, "clues": [], "elevation": 0}
     try:
-        iod_dist = max(math.dist(
-            [lms[33].x * w,  lms[33].y * h],
-            [lms[263].x * w, lms[263].y * h]
-        ), 1.0)
         rgb_result = extract_forehead_rgb(frame, lms, w, h, iod_dist)
         if rgb_result is not None:
             _, _, _, g_norm = rgb_result
@@ -1199,36 +1599,89 @@ def process_frame(img_bytes, audio_features=None):
     except Exception as e:
         print(f"[VERITY] rPPG error (non-fatal): {e}", flush=True)
 
+    # ── Multi-region perfusion mapping (non-fatal) ─────────
+    perfusion_now = {}
+    try:
+        perfusion_now = compute_perfusion_map(frame, lms, w, h, iod_dist)
+        if perfusion_now:
+            perfusion_history.append({"t": time.time(), **perfusion_now})
+    except Exception as e:
+        print(f"[VERITY] Perfusion mapping error (non-fatal): {e}", flush=True)
+
+    # ── Body language via MediaPipe Pose (best-effort, non-fatal) ──
+    body_feat = None
+    fidget_score = 0.0
+    try:
+        pose_lm = get_pose_landmarker()
+        if pose_lm is not None:
+            pose_result = pose_lm.detect(mp_image)
+            if pose_result.pose_landmarks:
+                body_feat = extract_body_features(pose_result.pose_landmarks[0], w, h)
+                if body_feat:
+                    body_history.append(body_feat)
+                    wrist_pos_history.append(body_feat)
+                    fidget_score = compute_fidget_score(list(wrist_pos_history))
+    except Exception as e:
+        print(f"[VERITY] Body pose error (non-fatal): {e}", flush=True)
+
+    # ── Liveness heuristic (advisory only, non-fatal) ──────
+    liveness_score, liveness_reasons = 1.0, []
+    try:
+        liveness_score, liveness_reasons = compute_liveness_score(
+            frame, hr_result.get("quality", 0.0), blink_rate_30s if 'blink_rate_30s' in dir() else 0.0, frame_count
+        )
+        liveness_history.append(liveness_score)
+    except Exception as e:
+        print(f"[VERITY] Liveness check error (non-fatal): {e}", flush=True)
+
+    # ── Session integrity hash chain (non-fatal) ───────────
+    try:
+        if session_chain_seed is None:
+            session_chain_seed = hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
+        prev = session_hash_chain[-1]["hash"] if session_hash_chain else session_chain_seed
+        snapshot = {k: v for k, v in features.items() if isinstance(v, (int, float))}
+        new_hash = chain_frame_hash(prev, frame_count + 1, time.time(), snapshot)
+        session_hash_chain.append({"frame": frame_count + 1, "t": round(time.time(), 3), "hash": new_hash})
+        if len(session_hash_chain) > 500:   # cap memory — keep most recent window
+            session_hash_chain = session_hash_chain[-500:]
+    except Exception as e:
+        print(f"[VERITY] Integrity chain error (non-fatal): {e}", flush=True)
+
     # Store history
     now = time.time()
     expression_history.append(features)
     timestamp_history.append(now)
     frame_count += 1
 
-    # ── Blink detection & rate ────────────────────────────────────
-    eye_currently_open = features["eye_aperture"] > 0.07
-    if last_eye_open and not eye_currently_open:
-        blink_history.append(now)   # falling edge = blink
-    last_eye_open = eye_currently_open
-    # Rolling rate over 30s window
-    blink_rate_30s = sum(1 for t in blink_history if now - t < 30.0) * 2.0  # × 2 → per minute
-    features["blink_rate"] = round(blink_rate_30s, 1)
+    # ── New biometric channels (non-fatal if they fail) ───────────────────
+    try:
+        eye_currently_open = features["eye_aperture"] > 0.07
+        if last_eye_open and not eye_currently_open:
+            blink_history.append(now)
+        last_eye_open = eye_currently_open
+        blink_rate_30s = sum(1 for t in blink_history if now - t < 30.0) * 2.0
+        features["blink_rate"] = round(blink_rate_30s, 1)
 
-    # ── Gaze history ─────────────────────────────────────────────
-    gaze_history.append({
-        "t":          now,
-        "horizontal": features["gaze_horizontal"],
-        "deviation":  features["gaze_deviation"],
-        "vertical":   features["gaze_vertical"],
-    })
+        gaze_history.append({
+            "t":          now,
+            "horizontal": features.get("gaze_horizontal", 0.5),
+            "deviation":  features.get("gaze_deviation",  0.0),
+            "vertical":   features.get("gaze_vertical",   0.5),
+        })
+    except Exception as e:
+        print(f"[VERITY] Biometric tracking error (non-fatal): {e}", flush=True)
+        features.setdefault("blink_rate", 0.0)
 
-    # ── Disfluency & latency from frontend audio_features ────────
-    if audio_features:
-        disfluency_count = audio_features.get("disfluency_count", 0)
-        disfluency_history.append(disfluency_count)
-        lat = audio_features.get("response_latency", 0)
-        if lat > 0:
-            latency_current = lat
+    # ── Disfluency & latency from frontend ────────────────────────────────
+    try:
+        if audio_features:
+            disfluency_count = audio_features.get("disfluency_count", 0)
+            disfluency_history.append(disfluency_count)
+            lat = audio_features.get("response_latency", 0)
+            if lat and lat > 0:
+                latency_current = float(lat)
+    except Exception as e:
+        print(f"[VERITY] Disfluency/latency error (non-fatal): {e}", flush=True)
 
     # Baseline is now set manually via POST /baseline — no auto-capture
 
@@ -1237,9 +1690,14 @@ def process_frame(img_bytes, audio_features=None):
     # classify_emotion(is_delta=True) adapts its formulas accordingly.
     # Deception analysis also uses delta features (checks for deviations from neutral).
     adj_features = features.copy()
+    # Only subtract baseline for landmark-derived features — not temporal rates
+    # which have no meaningful baseline equivalent (blink_rate, gaze_deviation etc.)
+    SKIP_DELTA = {"blink_rate", "gaze_horizontal", "gaze_deviation", "gaze_vertical",
+                  "pupil_ratio", "head_yaw", "head_pitch",
+                  "brow_asymmetry", "eye_asymmetry", "mouth_asymmetry"}
     if baseline_features:
         for k in adj_features:
-            if k in baseline_features:
+            if k in baseline_features and k not in SKIP_DELTA:
                 adj_features[k] = features[k] - baseline_features[k]
 
     calibrated   = bool(baseline_features)
@@ -1267,6 +1725,29 @@ def process_frame(img_bytes, audio_features=None):
         list(expression_history),
         list(timestamp_history)
     )
+
+    # ── Merge BODY and PERFUSION clues (non-fatal) ─────────
+    try:
+        if body_feat:
+            baseline_body = body_history[0] if len(body_history) > 5 else {}
+            body_clues = analyse_body_deception(body_feat, fidget_score, baseline_body)
+            deception["clues"] = deception.get("clues", []) + body_clues
+        if perfusion_now and perfusion_baseline:
+            perf_clues = analyse_perfusion_deception(perfusion_now, perfusion_baseline)
+            deception["clues"] = deception.get("clues", []) + perf_clues
+    except Exception as e:
+        print(f"[VERITY] Body/perfusion clue merge error (non-fatal): {e}", flush=True)
+
+    # ── Explainability: attach the exact evidence behind each clue ─
+    # Per-clue feature snapshot lets an examiner inspect *why* a clue fired
+    # rather than just trusting the text description.
+    try:
+        evidence_snapshot = {k: round(v, 4) for k, v in features.items() if isinstance(v, (int, float))}
+        for clue in deception.get("clues", []):
+            clue["evidence"] = evidence_snapshot
+            clue["frame"] = frame_count
+    except Exception:
+        pass
 
     # Face region highlights for overlay
     def region_pts(indices):
@@ -1364,6 +1845,33 @@ def process_frame(img_bytes, audio_features=None):
     # Respiration rate (smoothed)
     resp_rate = round(float(np.mean(list(resp_history)[-10:])), 1) if resp_history else 0.0
 
+    # ── Confidence calibration ──────────────────────────────
+    sig_quality = compute_signal_quality(
+        face_detected=True,
+        rppg_quality=hr_result.get("quality", 0.0),
+        voice_active=bool(audio_features and audio_features.get("speaking")),
+        mic_rms=audio_features.get("rms", 0) if audio_features else 0,
+        blink_rate=blink_rate_30s,
+        frames_seen=frame_count,
+    )
+    signal_quality_history.append(sig_quality)
+    n_clues_active = len(deception.get("clues", []))
+    conf_low, conf_high, conf_label = compute_confidence_band(
+        deception.get("deception_score", 0), sig_quality, n_clues_active
+    )
+
+    # ── Body language summary ───────────────────────────────
+    body_summary = None
+    if body_feat:
+        body_summary = {**body_feat, "fidget_score": fidget_score}
+
+    # ── Session integrity summary ───────────────────────────
+    integrity = {
+        "frames_sealed": len(session_hash_chain),
+        "chain_hash":    session_hash_chain[-1]["hash"][:12] if session_hash_chain else None,
+        "seed":          session_chain_seed,
+    }
+
     return {
         "status":              "ok",
         "frame":               frame_count,
@@ -1376,6 +1884,11 @@ def process_frame(img_bytes, audio_features=None):
         "hr":                  hr_result,
         "gaze":                gaze_summary,
         "resp_rate":           resp_rate,
+        "body":                body_summary,
+        "perfusion":           perfusion_now,
+        "liveness":            {"score": liveness_score, "reasons": liveness_reasons},
+        "confidence":          {"low": conf_low, "high": conf_high, "label": conf_label, "signal_quality": round(sig_quality, 2)},
+        "integrity":           integrity,
         "baseline_ready":      bool(baseline_features),
         "calibrating":         frame_count < 35,
         "calibration_exprs":   sorted(feature_peaks.keys()),
@@ -1410,10 +1923,16 @@ def analyse():
     if not data or "image" not in data:
         return jsonify({"error": "No image provided"}), 400
 
-    img_b64       = data["image"].split(",")[-1]
-    audio_features = data.get("audio")          # optional — None if mic not available
-    result        = process_frame(img_b64, audio_features)
-    return jsonify(result)
+    img_b64        = data["image"].split(",")[-1]
+    audio_features = data.get("audio")
+    try:
+        result = process_frame(img_b64, audio_features)
+        return jsonify(result)
+    except Exception as e:
+        import traceback
+        err = traceback.format_exc()
+        print(f"[VERITY] /analyse error: {err}", flush=True)
+        return jsonify({"error": "no_face", "message": str(e)[:120]}), 200
 
 
 @app.route("/mark_question", methods=["POST"])
@@ -1431,7 +1950,76 @@ def mark_question():
         "scores": [], "clues": [], "pitches": [],
         "jitters": [], "syllable_rates": []
     }
+    question_transcripts[question_current] = ""
     return jsonify({"status": "ok", "question": question_current})
+
+
+@app.route("/submit_transcript", methods=["POST"])
+def submit_transcript():
+    """Accumulate Web Speech transcript text for the current question segment.
+    Used for CBCA-style content analysis and cross-question contradiction
+    detection in the AI forensic report."""
+    try:
+        data = request.get_json() or {}
+        text = (data.get("text") or "").strip()
+        q    = data.get("question", question_current)
+        if not text:
+            return jsonify({"status": "ok"})
+        if q not in question_transcripts:
+            question_transcripts[q] = ""
+        question_transcripts[q] = (question_transcripts[q] + " " + text).strip()
+        return jsonify({"status": "ok", "question": q,
+                         "length": len(question_transcripts[q])})
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/session_integrity")
+def session_integrity():
+    """Return the current tamper-evident hash-chain status. Verifies internal
+    consistency only — this does NOT make VERITY output legally admissible."""
+    return jsonify({
+        "frames_sealed": len(session_hash_chain),
+        "seed":          session_chain_seed,
+        "latest_hash":   session_hash_chain[-1]["hash"] if session_hash_chain else None,
+        "chain_sample":  session_hash_chain[-5:] if session_hash_chain else [],
+    })
+
+
+@app.route("/protocols")
+def protocols():
+    """Return structured interview protocol templates (PEACE model and the
+    Cognitive Interview technique) plus a library of cognitive-load-inducing
+    follow-up probes the examiner can use when signals spike on a topic."""
+    return jsonify({
+        "peace": {
+            "name": "PEACE Model",
+            "stages": [
+                {"stage": "Preparation & Planning", "note": "Define objectives, review available evidence, plan question topics."},
+                {"stage": "Engage & Explain",        "note": "Build rapport, explain the process and its purpose to the subject."},
+                {"stage": "Account",                 "note": "Obtain the subject's free account, then probe with open and closed questions."},
+                {"stage": "Closure",                  "note": "Summarise what was said, give the subject a chance to add or correct."},
+                {"stage": "Evaluate",                 "note": "Review the account against other evidence and the session's biometric signals."},
+            ],
+        },
+        "cognitive_interview": {
+            "name": "Cognitive Interview",
+            "stages": [
+                {"stage": "Context Reinstatement", "note": "Ask the subject to mentally recreate the environment and emotional state at the time."},
+                {"stage": "Open Recall",            "note": "Free, uninterrupted narrative — do not interrupt even with pauses."},
+                {"stage": "Reverse-Order Recall",   "note": "Ask the subject to recount events from end to start — substantially harder to fabricate convincingly."},
+                {"stage": "Change of Perspective",  "note": "Ask the subject to describe events from another person's viewpoint."},
+            ],
+        },
+        "follow_up_probes": [
+            "Tell me that again, but starting from the end and working backwards.",
+            "Can you describe that in even more detail than before?",
+            "What were you looking at, specifically, at that moment?",
+            "Who else was present, and where exactly were they standing?",
+            "What happened immediately before that?",
+            "If I asked someone else who was there, what would they tell me?",
+        ],
+    })
 
 
 @app.route("/reset", methods=["POST"])
@@ -1441,6 +2029,8 @@ def reset():
     global question_current, question_markers, question_voice_data
     global rppg_buffer, hr_history, hr_baseline
     global last_eye_open, blink_rate_30s, latency_current
+    global perfusion_baseline, session_hash_chain, session_chain_seed
+    global question_transcripts
     expression_history.clear()
     timestamp_history.clear()
     voice_history.clear()
@@ -1450,6 +2040,11 @@ def reset():
     gaze_history.clear()
     disfluency_history.clear()
     resp_history.clear()
+    body_history.clear()
+    wrist_pos_history.clear()
+    perfusion_history.clear()
+    liveness_history.clear()
+    signal_quality_history.clear()
     baseline_features  = {}
     baseline_sigma     = {}
     feature_peaks      = {}
@@ -1459,9 +2054,13 @@ def reset():
     last_eye_open      = True
     blink_rate_30s     = 0.0
     latency_current    = 0.0
+    perfusion_baseline = {}
+    session_hash_chain = []
+    session_chain_seed = None
     question_current   = 0
     question_markers   = []
     question_voice_data = {}
+    question_transcripts = {}
     frame_count       = 0
     session_start     = time.time()
     return jsonify({"status": "reset"})
@@ -1474,6 +2073,7 @@ def set_baseline():
     Uses the last 30 frames (min 3). Called manually by the user.
     """
     global baseline_features, baseline_sigma, emotion_ema, voice_baseline, hr_baseline
+    global perfusion_baseline
     try:
         n = len(expression_history)
         if n < 3:
@@ -1485,6 +2085,15 @@ def set_baseline():
         baseline_features = compute_baseline(recent)
         baseline_sigma    = compute_baseline_sigma(recent)   # per-person noise floors
         emotion_ema       = {}
+
+        # Capture multi-region perfusion baseline (non-fatal if insufficient data)
+        recent_perfusion = list(perfusion_history)[-20:]
+        if recent_perfusion:
+            perfusion_baseline = {}
+            for region in ["nose", "cheek_left", "cheek_right", "chin"]:
+                vals = [p[region] for p in recent_perfusion if region in p]
+                if vals:
+                    perfusion_baseline[region] = float(np.mean(vals))
 
         # Capture voice baseline from recent voiced frames (optional)
         voiced = [v for v in list(voice_history)[-20:]
@@ -1510,12 +2119,14 @@ def set_baseline():
             "frames_used":    len(recent),
             "voice_baseline": bool(voice_baseline),
             "hr_baseline":    round(hr_baseline, 1),
+            "perfusion_baseline_set": bool(perfusion_baseline),
             # Profile data — client can persist in localStorage for cross-session baseline
             "profile": {
                 "baseline_features": baseline_features,
                 "baseline_sigma":    baseline_sigma,
                 "hr_baseline":       round(hr_baseline, 1),
                 "voice_baseline":    voice_baseline,
+                "perfusion_baseline": perfusion_baseline,
             }
         })
 
@@ -1526,7 +2137,7 @@ def set_baseline():
 @app.route("/load_baseline", methods=["POST"])
 def load_baseline():
     """Restore a previously saved subject profile (from localStorage on client)."""
-    global baseline_features, baseline_sigma, hr_baseline, voice_baseline
+    global baseline_features, baseline_sigma, hr_baseline, voice_baseline, perfusion_baseline
     try:
         data = request.get_json() or {}
         profile = data.get("profile", {})
@@ -1536,6 +2147,7 @@ def load_baseline():
         baseline_sigma    = profile.get("baseline_sigma", {})
         hr_baseline       = float(profile.get("hr_baseline", 0.0))
         voice_baseline    = profile.get("voice_baseline", {})
+        perfusion_baseline = profile.get("perfusion_baseline", {})
         return jsonify({"status": "ok", "message": "Profile restored successfully"})
     except Exception as exc:
         return jsonify({"error": f"Profile load error: {exc}"}), 500
@@ -1687,6 +2299,15 @@ def ai_analysis():
         clue_text  = "\n".join(f"  {l}: {n}×" for l, n in top_clues)  or "  None detected"
         voice_text = "\n".join(f"  {l}: {n}×" for l, n in top_voice) or "  None detected"
 
+        transcript_lines = []
+        for q in sorted(question_transcripts.keys()):
+            txt = question_transcripts[q].strip()
+            if txt:
+                # Cap per-question transcript length to keep prompt manageable
+                truncated = txt[:600] + ("…" if len(txt) > 600 else "")
+                transcript_lines.append(f"  Q{q}: \"{truncated}\"")
+        transcript_text = "\n".join(transcript_lines) or "  No transcript captured (microphone may have been off, or Web Speech API unsupported in this browser)"
+
         prompt = f"""You are a forensic deception analyst reviewing output from VERITY, a multimodal deception detection system. Channels: facial landmarks (Ekman framework), gaze tracking, blink rate, pupil estimation, facial asymmetry, head pose, rPPG heart rate, respiration proxy, voice acoustics, speech disfluency, and response latency.
 
 SESSION SUMMARY
@@ -1722,6 +2343,24 @@ QUESTION COMPARATIVE ANALYSIS (z-scores vs session mean)
 PEAK DECEPTION MOMENTS
 {', '.join(peak_strs) if peak_strs else 'None above threshold'}
 
+TRANSCRIPTS BY QUESTION (for content & consistency analysis)
+{transcript_text}
+
+Additionally, analyse the transcripts above using two methods:
+
+1. STATEMENT VALIDITY (CBCA-inspired): For each question with a transcript of
+   meaningful length, qualitatively assess: logical structure, quantity of
+   specific detail, contextual embedding (time/place anchoring), reproduction
+   of conversation, mention of unexpected complications, spontaneous
+   self-corrections, and admissions of imperfect memory. Truthful accounts
+   statistically score higher on these criteria (Vrij, 2008; Steller & Köhnken).
+   Do NOT treat a short or guarded answer as automatically deceptive — note
+   genuine limitations honestly.
+
+2. CONTRADICTION CHECK: Compare statements across different questions for
+   factual inconsistency (times, locations, sequences, named details). Only
+   flag genuine contradictions, not natural variation in phrasing.
+
 Return ONLY a valid JSON object — no markdown, no preamble, no explanation outside the JSON. Use this exact schema:
 
 {{
@@ -1730,6 +2369,8 @@ Return ONLY a valid JSON object — no markdown, no preamble, no explanation out
   "narrative": "3-4 sentences interpreting the overall pattern, trend, and most significant clues in professional forensic language.",
   "key_findings": ["concise finding 1", "concise finding 2", "concise finding 3"],
   "voice_summary": "2-3 sentences specifically interpreting the voice metrics above — pitch level and range, jitter, speech rate, pause patterns — and what they suggest about cognitive load or stress. Write null only if speaking_pct is 0.",
+  "content_analysis": "2-3 sentences on statement validity (CBCA-style) across the transcripts — structure, detail, contextual grounding. Write null if no meaningful transcript text was captured.",
+  "contradictions": ["quoted contradiction 1 with question numbers", "quoted contradiction 2"] or [] if none found,
   "examiner_note": "One actionable sentence for the examiner on what to probe next or what to treat with caution."
 }}
 
@@ -1738,7 +2379,7 @@ Be precise but do not overclaim certainty — no system can determine deception 
         # ── Call Anthropic API ─────────────────────────────────────
         payload = _json.dumps({
             "model":      "claude-sonnet-4-6",
-            "max_tokens": 800,
+            "max_tokens": 1100,
             "messages":   [{"role": "user", "content": prompt}],
         }).encode()
 
@@ -1790,8 +2431,13 @@ def health():
     return jsonify({
         "status":           "ok",
         "mediapipe":        "loaded",
+        "pose_available":   not _pose_unavailable,
         "api_key_set":      bool(os.environ.get("ANTHROPIC_API_KEY")),
         "api_key_length":   len(os.environ.get("ANTHROPIC_API_KEY", "")),
+        "liveness_note":    "Liveness score is a heuristic advisory signal (rPPG presence, "
+                             "blink naturalness, image texture) — it is NOT a trained "
+                             "deepfake/spoof classifier and should not be used as a "
+                             "standalone authentication decision.",
     })
 
 
