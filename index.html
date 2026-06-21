@@ -142,10 +142,11 @@ header {
   background: var(--dark); display: flex; flex-direction: column;
   padding: 20px; gap: 16px; overflow: hidden;
 }
+.camera-strips-scroll { flex-shrink: 0; max-height: 42vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
 .camera-header { display: flex; justify-content: space-between; align-items: center; }
 
 .camera-feed-wrap {
-  position: relative; flex: 1;
+  position: relative; flex: 1; min-height: 280px;
   background: #050709; border: 1px solid var(--border);
   overflow: hidden; display: flex; align-items: center; justify-content: center;
 }
@@ -744,6 +745,9 @@ header {
           <span style="opacity:0.5;font-size:0.72rem">Position face within frame</span>
         </div>
       </div>
+
+      <div class="camera-strips-scroll" id="cameraStripsScroll">
+
       <div class="calibration-bar" id="calBar">
         <span id="calPhaseLabel">RELAX FACE  ·  HOLD NEUTRAL  ·  THEN SET BASELINE</span>
         <div class="cal-progress"><div class="cal-fill" id="calFill" style="width:0%"></div></div>
@@ -864,6 +868,8 @@ header {
         </div>
       </div>
       <div class="body-unavailable" id="bodyUnavailable" style="display:none">BODY LANGUAGE TRACKING UNAVAILABLE (optional channel)</div>
+
+      </div><!-- /camera-strips-scroll -->
     </div>
 
     <div class="right-panel">
@@ -2117,10 +2123,14 @@ async function captureBaseline() {
     document.getElementById('qualIcon').textContent = '◉';
     document.getElementById('qualText').textContent = `BASELINE LOCKED  ·  ${data.frames_used} FRAMES`;
     setTimeout(() => banner.classList.remove('show'), 4000);
-    // Save subject profile to localStorage for cross-session persistence
+    // Save subject profile to localStorage for cross-session persistence.
+    // IMPORTANT: never use a blocking prompt()/confirm() here — it freezes
+    // all JS on the page (including the camera loop and guided-cal timers)
+    // until dismissed, which made baseline/guided-cal look broken or hung.
     if (data.profile) {
-      const name = prompt('Save subject profile? Enter subject name (or cancel to skip):');
-      if (name !== null) saveSubjectProfile(data.profile, name);
+      saveSubjectProfile(data.profile, 'default');
+      const qt = document.getElementById('qualText');
+      if (qt) setTimeout(() => { qt.textContent = 'PROFILE SAVED LOCALLY'; }, 2200);
     }
     // Guided calibration is now MANUAL — user clicks the wizard steps themselves
     // Auto-launching caused corrupted peaks when user wasn't following along

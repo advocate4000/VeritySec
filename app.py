@@ -212,6 +212,14 @@ signal_quality_history = deque(maxlen=30)  # rolling frame-quality scores 0-1
 # classifier; see /health endpoint notes) ──────────────────
 liveness_history = deque(maxlen=60)
 
+# Cached results for throttled per-frame channels (pose, liveness) — reused
+# on frames where the expensive computation is skipped (see POSE_EVERY,
+# LIVENESS_EVERY in process_frame).
+_last_body_feat        = None
+_last_fidget_score      = 0.0
+_last_liveness_score    = 1.0
+_last_liveness_reasons  = []
+
 # ── Voice state ───────────────────────────────────────────
 VOICE_HISTORY_LEN = 90          # ~11s at one sample per 120ms (extended for pause analysis)
 voice_history  = deque(maxlen=VOICE_HISTORY_LEN)
@@ -1559,8 +1567,7 @@ def process_frame(img_bytes, audio_features=None):
     global frame_count, baseline_features, emotion_ema
     global last_eye_open, blink_rate_30s, latency_current
     global perfusion_baseline, session_hash_chain, session_chain_seed
-
-    # Decode image
+    global _last_body_feat, _last_fidget_score, _last_liveness_score, _last_liveness_reasons
     nparr  = np.frombuffer(base64.b64decode(img_bytes), np.uint8)
     frame  = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if frame is None:
@@ -1609,30 +1616,44 @@ def process_frame(img_bytes, audio_features=None):
         print(f"[VERITY] Perfusion mapping error (non-fatal): {e}", flush=True)
 
     # ── Body language via MediaPipe Pose (best-effort, non-fatal) ──
-    body_feat = None
-    fidget_score = 0.0
-    try:
-        pose_lm = get_pose_landmarker()
-        if pose_lm is not None:
-            pose_result = pose_lm.detect(mp_image)
-            if pose_result.pose_landmarks:
-                body_feat = extract_body_features(pose_result.pose_landmarks[0], w, h)
-                if body_feat:
-                    body_history.append(body_feat)
-                    wrist_pos_history.append(body_feat)
-                    fidget_score = compute_fidget_score(list(wrist_pos_history))
-    except Exception as e:
-        print(f"[VERITY] Body pose error (non-fatal): {e}", flush=True)
+    # THROTTLED to every 5th frame: a full second neural network on every
+    # single frame overwhelms the single sync Gunicorn worker Render forces
+    # on free-tier hosting, causing /baseline and /calibrate requests to
+    # queue for seconds behind a backlog of /analyse calls. Same pattern as
+    # the CNN throttling used for the HSEmotions classifier in earlier
+    # iterations (CNN_EVERY = 5).
+    POSE_EVERY = 5
+    body_feat = _last_body_feat
+    fidget_score = _last_fidget_score
+    if frame_count % POSE_EVERY == 0:
+        try:
+            pose_lm = get_pose_landmarker()
+            if pose_lm is not None:
+                pose_result = pose_lm.detect(mp_image)
+                if pose_result.pose_landmarks:
+                    body_feat = extract_body_features(pose_result.pose_landmarks[0], w, h)
+                    if body_feat:
+                        body_history.append(body_feat)
+                        wrist_pos_history.append(body_feat)
+                        fidget_score = compute_fidget_score(list(wrist_pos_history))
+                        _last_body_feat, _last_fidget_score = body_feat, fidget_score
+        except Exception as e:
+            print(f"[VERITY] Body pose error (non-fatal): {e}", flush=True)
 
     # ── Liveness heuristic (advisory only, non-fatal) ──────
-    liveness_score, liveness_reasons = 1.0, []
-    try:
-        liveness_score, liveness_reasons = compute_liveness_score(
-            frame, hr_result.get("quality", 0.0), blink_rate_30s if 'blink_rate_30s' in dir() else 0.0, frame_count
-        )
-        liveness_history.append(liveness_score)
-    except Exception as e:
-        print(f"[VERITY] Liveness check error (non-fatal): {e}", flush=True)
+    # Texture check (cv2.Laplacian over the full frame) is throttled too —
+    # it's cheap relative to Pose but still adds up at 8fps on shared CPU.
+    LIVENESS_EVERY = 5
+    liveness_score, liveness_reasons = _last_liveness_score, _last_liveness_reasons
+    if frame_count % LIVENESS_EVERY == 0:
+        try:
+            liveness_score, liveness_reasons = compute_liveness_score(
+                frame, hr_result.get("quality", 0.0), blink_rate_30s if 'blink_rate_30s' in dir() else 0.0, frame_count
+            )
+            liveness_history.append(liveness_score)
+            _last_liveness_score, _last_liveness_reasons = liveness_score, liveness_reasons
+        except Exception as e:
+            print(f"[VERITY] Liveness check error (non-fatal): {e}", flush=True)
 
     # ── Session integrity hash chain (non-fatal) ───────────
     try:
