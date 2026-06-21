@@ -235,6 +235,7 @@ header {
    LIVE TAB — Right panel
    ══════════════════════════════════════ */
 .right-panel { background:var(--panel); display:flex; flex-direction:column; overflow:hidden; }
+.right-panel-scroll { flex:1; min-height:0; overflow-y:auto; display:flex; flex-direction:column; }
 
 .deception-section { padding:20px; border-bottom:1px solid var(--border); }
 .meter-title {
@@ -347,9 +348,9 @@ header {
 .feat-bar-fill { height:100%; background:var(--cyan); width:0%; transition:width 0.15s, background 0.3s; }
 
 /* Clues */
-.clues-section { flex:1; overflow:hidden; display:flex; flex-direction:column; }
+.clues-section { display:flex; flex-direction:column; }
 .clues-header { padding:14px 20px 12px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); }
-.clues-log { flex:1; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
+.clues-log { max-height:280px; overflow-y:auto; padding:12px 16px; display:flex; flex-direction:column; gap:10px; }
 .clue-card { border:1px solid var(--border); padding:12px 14px; display:flex; flex-direction:column; gap:6px; animation:slideIn 0.3s ease; }
 @keyframes slideIn { from{opacity:0;transform:translateX(8px)} to{opacity:1;transform:translateX(0)} }
 .clue-card.CRITICAL { border-color:var(--red);   background:rgba(232,64,64,0.05); }
@@ -454,7 +455,7 @@ header {
 .vu-seg.ghost-r { background:#0e0200; }
 .clue-label { font-size:0.78rem; color:var(--text-hi); font-family:var(--font-ui); font-weight:700; }
 .clue-detail { font-size:0.72rem; color:var(--text); line-height:1.6; }
-.no-clues { display:flex; align-items:center; justify-content:center; flex:1; font-size:0.78rem; letter-spacing:0.15em; color:var(--text); opacity:0.4; flex-direction:column; gap:10px; }
+.no-clues { display:flex; align-items:center; justify-content:center; padding:24px 0; font-size:0.78rem; letter-spacing:0.15em; color:var(--text); opacity:0.4; flex-direction:column; gap:10px; }
 .severity-badge { font-size:0.58rem; letter-spacing:0.15em; padding:2px 6px; border-radius:1px; margin-left:auto; flex-shrink:0; }
 .severity-badge.CRITICAL { background:var(--red-lo);  color:var(--red); }
 .severity-badge.HIGH     { background:var(--amber-lo); color:var(--amber); }
@@ -882,6 +883,8 @@ header {
         </div>
       </div>
 
+      <div class="right-panel-scroll" id="rightPanelScroll">
+
       <div class="timeline-section">
         <div class="timeline-label">Deception History (90 frames)</div>
         <div class="timeline-track" id="timelineTrack"></div>
@@ -934,6 +937,8 @@ header {
           <div class="ai-placeholder">Collect 10+ seconds of data, then generate a Claude-powered forensic report.</div>
         </div>
       </div>
+
+      </div><!-- /right-panel-scroll -->
 
       <div class="meta-bar">
         <div class="meta-item"><span class="meta-key">ELAPSED</span><span class="meta-val" id="metaElapsed">0.0s</span></div>
@@ -1857,11 +1862,28 @@ function checkFollowupTrigger(latency, disfluencyRate) {
 
 // ── Interview protocol panel ─────────────────────────────────
 let _protocolData = null;
-async function loadProtocols() {
+async function loadProtocols(attempt = 1) {
   try {
-    const res = await fetch('/protocols');
+    // cache:'no-store' + a cache-busting query param defeats any browser/proxy
+    // cache that may have stored an earlier 404 from before deployment finished.
+    const res = await fetch('/protocols?_=' + Date.now(), { cache: 'no-store' });
+    const ct = res.headers.get('content-type') || '';
+    if (!res.ok || !ct.includes('application/json')) {
+      throw new Error(`Unexpected response (status ${res.status})`);
+    }
     _protocolData = await res.json();
-  } catch(e) { console.warn('[VERITY] Could not load protocols:', e); }
+    const panel = document.getElementById('protocolPanel');
+    if (panel) panel.style.display = '';   // re-show in case a prior attempt hid it
+  } catch(e) {
+    console.warn(`[VERITY] Protocol library load failed (attempt ${attempt}):`, e.message);
+    if (attempt < 3) {
+      setTimeout(() => loadProtocols(attempt + 1), 1500 * attempt);
+    } else {
+      console.warn('[VERITY] Protocol library unavailable after 3 attempts — disabling protocol panel.');
+      const panel = document.getElementById('protocolPanel');
+      if (panel) panel.style.display = 'none';
+    }
+  }
 }
 function renderProtocol() {
   const sel = document.getElementById('protocolSelect');
