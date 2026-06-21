@@ -807,6 +807,12 @@ function updateMobileBioUI(data) {
 
 async function captureAndAnalyse(){
   if(!liveState.running)return;
+  // Skip this tick if the previous /analyse hasn't returned yet — prevents
+  // unbounded request backlog on single-worker hosting (see desktop UI for
+  // full explanation). Without this, baseline/calibrate calls can queue for
+  // up to a minute behind a growing pile of stale analysis requests.
+  if(liveState.analysisInFlight){ liveState.skippedFrames=(liveState.skippedFrames||0)+1; return; }
+  liveState.analysisInFlight=true;
   const off=document.createElement('canvas');off.width=video.videoWidth||640;off.height=video.videoHeight||480;off.getContext('2d').drawImage(video,0,0);
   try{
     const res=await fetch('/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:off.toDataURL('image/jpeg',0.75),session_id:SESSION_ID,audio:(() => {
@@ -821,6 +827,7 @@ async function captureAndAnalyse(){
     else if(data.error==='no_face')handleNoFace(true);
     else{handleNoFace(false);setStatus('warning',(data.message||data.error||'ERROR').substring(0,20).toUpperCase());}
   }catch(e){setStatus('warning','NETWORK ERROR');}
+  finally{ liveState.analysisInFlight=false; }
 }
 function handleNoFace(show){const ov=document.getElementById('noFaceOverlay');show?ov.classList.remove('hidden'):ov.classList.add('hidden');}
 function updateUI(data){
