@@ -171,6 +171,7 @@ body::before{
 .m-clue-type.LEAKAGE{background:var(--green-lo);color:var(--green);}
 .m-clue-type.VOICE{background:var(--purple-lo);color:var(--purple);}
 .m-clue-type.CARDIAC{background:rgba(232,75,53,0.12);color:#ff7060;} .m-clue-type.GAZE{background:rgba(53,180,232,0.12);color:var(--cyan);} .m-clue-type.BIOMETRIC{background:rgba(176,127,255,0.14);color:var(--purple);}
+.m-clue-type.BODY{background:rgba(176,127,255,0.10);color:var(--purple);} .m-clue-type.PERFUSION{background:rgba(232,75,53,0.12);color:#ff7060;}
 .m-clue-label{font-size:0.72rem;color:var(--text-hi);font-weight:700;font-family:var(--font-ui);}
 .m-clue-detail{font-size:0.65rem;color:var(--text);line-height:1.5;}
 .m-no-clues{padding:20px 14px;font-size:0.7rem;letter-spacing:0.14em;color:var(--text);opacity:0.35;text-align:center;}
@@ -296,6 +297,7 @@ body::before{
     <div class="m-logo-sub">DECEPTION ANALYSIS</div>
   </div>
   <div class="m-status">
+    <div class="m-dot" id="livenessDot" style="background:var(--text)"></div>
     <div class="m-dot" id="sysStatus"></div>
     <span id="sysLabel">OFFLINE</span>
   </div>
@@ -332,6 +334,7 @@ body::before{
     <div class="m-gauge-track"><div class="m-gauge-fill" id="gaugeFill"></div></div>
     <div class="m-gauge-ticks"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>
     <div class="m-meta" id="metaMeta">FRAME 0000 · ELAPSED 0.0s</div>
+    <div class="m-meta" id="confMeta" style="margin-top:2px">CONF — · range —</div>
   </div>
 </div>
 
@@ -381,6 +384,23 @@ body::before{
       <div class="m-bio-label">RESP BPM</div>
       <div class="m-bio-value"><span id="mRespVal" style="color:var(--green)">—</span></div>
       <div class="m-bio-sub" id="mRespStatus">CALIBRATING</div>
+    </div>
+  </div>
+
+  <div class="m-bio-panel" id="mBodyPanel" style="display:none">
+    <div class="m-bio-cell">
+      <div class="m-bio-label">HAND-TO-FACE</div>
+      <div class="m-bio-value" id="mBodyH2F" style="color:var(--green)">—</div>
+    </div>
+    <div class="m-bio-div"></div>
+    <div class="m-bio-cell">
+      <div class="m-bio-label">POSTURE</div>
+      <div class="m-bio-value" id="mBodyPosture" style="color:var(--green)">—</div>
+    </div>
+    <div class="m-bio-div"></div>
+    <div class="m-bio-cell">
+      <div class="m-bio-label">FIDGET</div>
+      <div class="m-bio-value" id="mBodyFidget" style="color:var(--green)">—</div>
     </div>
   </div>
 
@@ -479,6 +499,7 @@ function initSpeechRecognition() {
           var t = ev.results[i][0].transcript;
           var n = (t.match(FILLER_RE) || []).length;
           disfluencyCount += n; totalDisfluency += n;
+          submitTranscript(t);
         }
       }
     };
@@ -489,6 +510,12 @@ function initSpeechRecognition() {
 function startSpeechRec() { if (speechRec) try { speechRec.start(); } catch(e){} }
 function stopSpeechRec()  { if (speechRec) try { speechRec.stop();  } catch(e){} }
 function drainDisfluency() { var v = disfluencyCount; disfluencyCount = 0; return v; }
+var currentQuestionNum = 0;
+function submitTranscript(text) {
+  if (!text || !text.trim()) return;
+  fetch('/submit_transcript', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ text: text, question: currentQuestionNum }) }).catch(function(){});
+}
 
 // ── Response latency ──────────────────────────────────────────
 var _qMarkTime = null, _lastLatency = 0;
@@ -695,6 +722,38 @@ function updateHrUI(hr){
   }
 }
 
+function updateConfidenceUI(conf) {
+  const el = document.getElementById('confMeta');
+  if (!el || !conf) return;
+  const col = conf.label === 'HIGH' ? 'var(--green)' : conf.label === 'LOW' ? 'var(--red)' : 'var(--amber)';
+  el.innerHTML = `<span style="color:${col}">CONF ${conf.label}</span> · range ${conf.low ?? '—'}–${conf.high ?? '—'}%`;
+}
+
+function updateLivenessUI(liveness) {
+  const dot = document.getElementById('livenessDot');
+  if (!dot || !liveness) return;
+  const score = liveness.score ?? 1.0;
+  if (score > 0.75) dot.style.background = 'var(--green)';
+  else if (score > 0.5) dot.style.background = 'var(--amber)';
+  else dot.style.background = 'var(--red)';
+}
+
+function updateMobileBodyUI(body) {
+  const panel = document.getElementById('mBodyPanel');
+  if (!body) return;
+  panel.style.display = 'grid';
+  const h2f = document.getElementById('mBodyH2F');
+  const posture = document.getElementById('mBodyPosture');
+  const fidget = document.getElementById('mBodyFidget');
+  if (body.hand_to_face < 0.35) { h2f.textContent='CONTACT'; h2f.style.color='var(--amber)'; }
+  else { h2f.textContent='CLEAR'; h2f.style.color='var(--green)'; }
+  if (body.arm_cross > 0.5) { posture.textContent='DEFENSIVE'; posture.style.color='var(--amber)'; }
+  else { posture.textContent='OPEN'; posture.style.color='var(--green)'; }
+  const fs = body.fidget_score || 0;
+  fidget.textContent = fs.toFixed(1);
+  fidget.style.color = fs > 3.5 ? 'var(--amber)' : 'var(--green)';
+}
+
 function updateMobileBioUI(data) {
   var gaze  = data.gaze || {};
   var resp  = data.resp_rate || 0;
@@ -775,6 +834,9 @@ function updateUI(data){
   updateVoiceUI(data.voice||{});
   updateHrUI(data.hr||{});
   updateMobileBioUI(data);
+  updateConfidenceUI(data.confidence);
+  updateLivenessUI(data.liveness);
+  updateMobileBodyUI(data.body);
   updateQuestionTimeline(data.question_summaries||{},data.question_current||0);
   drawOverlay(data);
   const _v=data.voice||{};
@@ -859,10 +921,11 @@ async function captureBaseline(){
 }
 async function markQuestion(){
   const btn=document.getElementById('markQBtn');btn.disabled=true;btn.innerHTML='<span class="m-btn-icon">◈</span>MARKING';
+  startLatencyTimer();
   try{
     const res=await fetch('/mark_question',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
     const data=await res.json();
-    if(data.status==='ok'){btn.innerHTML=`<span class="m-btn-icon">◈</span>Q${data.question}✓`;setTimeout(()=>{btn.innerHTML='<span class="m-btn-icon">◈</span>MARK Q';btn.disabled=false;},2000);}
+    if(data.status==='ok'){currentQuestionNum=data.question;btn.innerHTML=`<span class="m-btn-icon">◈</span>Q${data.question}✓`;setTimeout(()=>{btn.innerHTML='<span class="m-btn-icon">◈</span>MARK Q';btn.disabled=false;},2000);}
     else{btn.innerHTML='<span class="m-btn-icon">◈</span>MARK Q';btn.disabled=false;}
   }catch(e){btn.innerHTML='<span class="m-btn-icon">◈</span>MARK Q';btn.disabled=false;}
 }
