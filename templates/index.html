@@ -142,11 +142,11 @@ header {
   background: var(--dark); display: flex; flex-direction: column;
   padding: 20px; gap: 16px; overflow: hidden;
 }
-.camera-strips-scroll { flex-shrink: 0; max-height: 42vh; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+.camera-strips-scroll { flex-shrink: 0; max-height: 230px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
 .camera-header { display: flex; justify-content: space-between; align-items: center; }
 
 .camera-feed-wrap {
-  position: relative; flex: 1; min-height: 280px;
+  position: relative; flex: 1; min-height: 340px;
   background: #050709; border: 1px solid var(--border);
   overflow: hidden; display: flex; align-items: center; justify-content: center;
 }
@@ -1720,6 +1720,18 @@ function getZScoreColor(z) {
 
 async function captureAndAnalyse() {
   if (!liveState.running) return;
+  // CRITICAL: skip this tick entirely if the previous /analyse call hasn't
+  // returned yet. Without this guard, a new request fires every 120ms
+  // regardless of server response time — on Render's single-worker hosting,
+  // any request that takes >120ms causes the queue to grow UNBOUNDED for
+  // the rest of the session. Within a minute that can mean hundreds of
+  // backlogged requests, which is why /baseline and /calibrate calls were
+  // taking up to a minute to return — they were queued behind that backlog.
+  if (liveState.analysisInFlight) {
+    liveState.skippedFrames = (liveState.skippedFrames || 0) + 1;
+    return;
+  }
+  liveState.analysisInFlight = true;
   const off = document.createElement('canvas');
   off.width = video.videoWidth||640; off.height = video.videoHeight||480;
   off.getContext('2d').drawImage(video, 0, 0);
@@ -1760,6 +1772,8 @@ async function captureAndAnalyse() {
     // Network error — show in status bar, keep loop alive
     setStatus('warning', 'NETWORK ERROR');
     console.warn('[VERITY] Fetch error:', e);
+  } finally {
+    liveState.analysisInFlight = false;
   }
 }
 
@@ -2425,8 +2439,11 @@ async function startRecordCameraPreview() {
     // Stopped when recording begins to save resources during capture.
     const offPreview = document.createElement('canvas');
     offPreview.width = 320; offPreview.height = 240;
+    let previewInFlight = false;
     recState.previewInterval = setInterval(async () => {
       if (recState.mediaRecorder && recState.mediaRecorder.state === 'recording') return;
+      if (previewInFlight) return;
+      previewInFlight = true;
       const ctx2 = offPreview.getContext('2d');
       ctx2.drawImage(recVideo, 0, 0, 320, 240);
       const dataUrl = offPreview.toDataURL('image/jpeg', 0.6);
@@ -2439,6 +2456,7 @@ async function startRecordCameraPreview() {
         const data = await res.json();
         if (data.status === 'ok' && data.voice) updateVoiceUI(data.voice);
       } catch(_) {}
+      finally { previewInFlight = false; }
     }, 500);
 
   } catch(e) {
