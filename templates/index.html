@@ -261,12 +261,12 @@ header {
 .gauge-ticks { display:flex; justify-content:space-between; font-size:0.65rem; color:var(--text); opacity:0.6; }
 
 /* ── Confidence band ─────────────────────────────────────── */
-.confidence-row { display:flex; align-items:center; gap:8px; margin-top:10px; font-size:0.68rem; letter-spacing:0.1em; color:var(--text); }
-.confidence-badge { padding:2px 8px; border-radius:1px; font-weight:700; letter-spacing:0.12em; }
+.confidence-row { display:flex; align-items:center; gap:8px; margin-top:8px; font-size:0.62rem; letter-spacing:0.08em; color:var(--text); }
+.confidence-badge { padding:1px 7px; border-radius:1px; font-weight:700; letter-spacing:0.1em; min-width:46px; text-align:center; display:inline-block; font-size:0.6rem; }
 .confidence-badge.HIGH   { background:var(--green-lo); color:var(--green); }
 .confidence-badge.MEDIUM { background:var(--amber-lo); color:var(--amber); }
 .confidence-badge.LOW    { background:var(--red-lo);   color:var(--red); }
-.confidence-range { color:var(--text-hi); font-family:var(--font-ui); }
+.confidence-range { color:var(--text-hi); font-family:var(--font-ui); min-width:78px; display:inline-block; font-variant-numeric:tabular-nums; font-size:0.62rem; }
 
 /* ── Header badges: liveness + session integrity ─────────── */
 .header-badges { display:flex; align-items:center; gap:10px; }
@@ -1733,12 +1733,17 @@ async function captureAndAnalyse() {
   }
   liveState.analysisInFlight = true;
   const off = document.createElement('canvas');
-  off.width = video.videoWidth||640; off.height = video.videoHeight||480;
-  off.getContext('2d').drawImage(video, 0, 0);
+  // Downscale before sending: 480x360 is plenty for landmark detection on a
+  // face that fills a reasonable portion of frame, and meaningfully reduces
+  // MediaPipe's own inference time plus the base64 payload size — both of
+  // which directly increase the effective frame rate now that the in-flight
+  // guard ties UI responsiveness to real round-trip latency.
+  off.width = 480; off.height = 360;
+  off.getContext('2d').drawImage(video, 0, 0, 480, 360);
   try {
     const res  = await fetch('/analyse', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({image: off.toDataURL('image/jpeg', 0.75), session_id: SESSION_ID, audio: (() => {
+      body: JSON.stringify({image: off.toDataURL('image/jpeg', 0.65), session_id: SESSION_ID, audio: (() => {
       const af = extractAudioFeatures();
       if (!af) return null;
       // Disfluency count since last frame
@@ -1785,7 +1790,10 @@ function updateConfidenceUI(conf) {
   const label = conf.label || 'MEDIUM';
   badge.className = 'confidence-badge ' + label;
   badge.textContent = label;
-  range.textContent = `range ${conf.low ?? '—'}%–${conf.high ?? '—'}% · signal ${Math.round((conf.signal_quality||0)*100)}%`;
+  const lo = conf.low  != null ? Math.round(conf.low)  : '—';
+  const hi = conf.high != null ? Math.round(conf.high) : '—';
+  range.textContent = `range ${lo}–${hi}%`;
+  range.title = `Signal quality: ${Math.round((conf.signal_quality||0)*100)}%`;
 }
 
 // ── Liveness badge (heuristic — advisory only) ───────────────
