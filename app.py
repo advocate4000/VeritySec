@@ -219,6 +219,9 @@ _last_body_feat        = None
 _last_fidget_score      = 0.0
 _last_liveness_score    = 1.0
 _last_liveness_reasons  = []
+_last_hr_bpm     = 0.0
+_last_hr_quality = 0.0
+_last_perfusion  = {}
 
 # ── Voice state ───────────────────────────────────────────
 VOICE_HISTORY_LEN = 90          # ~11s at one sample per 120ms (extended for pause analysis)
@@ -240,7 +243,7 @@ question_voice_data = {}        # {q_num: {scores:[], clues:[], pitches:[], jitt
 
 # ── EMA smoothing (α=0.35: fast enough to feel live, slow enough to cut noise) ──
 # Applied server-side so the frontend renders stable values without any extra logic.
-EMA_ALPHA   = 0.35
+EMA_ALPHA   = 0.55
 emotion_ema: dict = {}
 
 # ──────────────────────────────────────────────────────────
@@ -1568,6 +1571,8 @@ def process_frame(img_bytes, audio_features=None):
     global last_eye_open, blink_rate_30s, latency_current
     global perfusion_baseline, session_hash_chain, session_chain_seed
     global _last_body_feat, _last_fidget_score, _last_liveness_score, _last_liveness_reasons
+    global _last_hr_bpm, _last_hr_quality
+    global _last_perfusion
     nparr  = np.frombuffer(base64.b64decode(img_bytes), np.uint8)
     frame  = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if frame is None:
@@ -1593,27 +1598,39 @@ def process_frame(img_bytes, audio_features=None):
     ), 1.0)
 
     # ── rPPG: extract forehead colour signal ──────────────
-    # Wrapped in try/except — rPPG must never prevent face analysis from completing
-    hr_result = {"bpm": 0.0, "quality": 0.0, "hr_score": 0.0, "clues": [], "elevation": 0}
+    # Wrapped in try/except — rPPG must never prevent face analysis from completing.
+    # HR_FFT_EVERY: heart rate changes slowly (seconds, not frames) — running the
+    # full zero-padded FFT every single frame is wasted CPU. Always append the
+    # raw signal sample (cheap) but only run the FFT periodically.
+    HR_FFT_EVERY = 3
+    hr_result = {"bpm": _last_hr_bpm, "quality": _last_hr_quality, "hr_score": 0.0, "clues": [], "elevation": 0}
     try:
         rgb_result = extract_forehead_rgb(frame, lms, w, h, iod_dist)
         if rgb_result is not None:
             _, _, _, g_norm = rgb_result
             rppg_buffer.append({"t": time.time(), "g_norm": g_norm})
-            bpm, quality = compute_hr_bpm(rppg_buffer)
-            if bpm > 0:
-                hr_history.append({"t": time.time(), "bpm": bpm, "quality": quality})
+            if frame_count % HR_FFT_EVERY == 0:
+                bpm, quality = compute_hr_bpm(rppg_buffer)
+                if bpm > 0:
+                    hr_history.append({"t": time.time(), "bpm": bpm, "quality": quality})
+                    _last_hr_bpm, _last_hr_quality = bpm, quality
+                    hr_result = {"bpm": bpm, "quality": quality, "hr_score": 0.0, "clues": [], "elevation": 0}
     except Exception as e:
         print(f"[VERITY] rPPG error (non-fatal): {e}", flush=True)
 
     # ── Multi-region perfusion mapping (non-fatal) ─────────
-    perfusion_now = {}
-    try:
-        perfusion_now = compute_perfusion_map(frame, lms, w, h, iod_dist)
-        if perfusion_now:
-            perfusion_history.append({"t": time.time(), **perfusion_now})
-    except Exception as e:
-        print(f"[VERITY] Perfusion mapping error (non-fatal): {e}", flush=True)
+    # Throttled — perfusion (blood flow) shifts are slow physiological signals,
+    # don't need recomputing every single frame.
+    PERFUSION_EVERY = 2
+    perfusion_now = _last_perfusion
+    if frame_count % PERFUSION_EVERY == 0:
+        try:
+            perfusion_now = compute_perfusion_map(frame, lms, w, h, iod_dist)
+            if perfusion_now:
+                perfusion_history.append({"t": time.time(), **perfusion_now})
+                _last_perfusion = perfusion_now
+        except Exception as e:
+            print(f"[VERITY] Perfusion mapping error (non-fatal): {e}", flush=True)
 
     # ── Body language via MediaPipe Pose (best-effort, non-fatal) ──
     # THROTTLED to every 5th frame: a full second neural network on every
@@ -1656,17 +1673,23 @@ def process_frame(img_bytes, audio_features=None):
             print(f"[VERITY] Liveness check error (non-fatal): {e}", flush=True)
 
     # ── Session integrity hash chain (non-fatal) ───────────
-    try:
-        if session_chain_seed is None:
-            session_chain_seed = hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
-        prev = session_hash_chain[-1]["hash"] if session_hash_chain else session_chain_seed
-        snapshot = {k: v for k, v in features.items() if isinstance(v, (int, float))}
-        new_hash = chain_frame_hash(prev, frame_count + 1, time.time(), snapshot)
-        session_hash_chain.append({"frame": frame_count + 1, "t": round(time.time(), 3), "hash": new_hash})
-        if len(session_hash_chain) > 500:   # cap memory — keep most recent window
-            session_hash_chain = session_hash_chain[-500:]
-    except Exception as e:
-        print(f"[VERITY] Integrity chain error (non-fatal): {e}", flush=True)
+    # Throttled to every 3rd frame — JSON serialisation + SHA-256 of the full
+    # feature vector is pure integrity overhead with no detection value, so
+    # it doesn't need to run at full frame rate. Still seals frequently
+    # enough (every ~0.3-0.5s) to remain a meaningful tamper-evidence chain.
+    HASH_EVERY = 3
+    if frame_count % HASH_EVERY == 0:
+        try:
+            if session_chain_seed is None:
+                session_chain_seed = hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
+            prev = session_hash_chain[-1]["hash"] if session_hash_chain else session_chain_seed
+            snapshot = {k: v for k, v in features.items() if isinstance(v, (int, float))}
+            new_hash = chain_frame_hash(prev, frame_count + 1, time.time(), snapshot)
+            session_hash_chain.append({"frame": frame_count + 1, "t": round(time.time(), 3), "hash": new_hash})
+            if len(session_hash_chain) > 500:   # cap memory — keep most recent window
+                session_hash_chain = session_hash_chain[-500:]
+        except Exception as e:
+            print(f"[VERITY] Integrity chain error (non-fatal): {e}", flush=True)
 
     # Store history
     now = time.time()
