@@ -726,7 +726,9 @@ function updateConfidenceUI(conf) {
   const el = document.getElementById('confMeta');
   if (!el || !conf) return;
   const col = conf.label === 'HIGH' ? 'var(--green)' : conf.label === 'LOW' ? 'var(--red)' : 'var(--amber)';
-  el.innerHTML = `<span style="color:${col}">CONF ${conf.label}</span> · range ${conf.low ?? '—'}–${conf.high ?? '—'}%`;
+  const lo = conf.low  != null ? Math.round(conf.low)  : '—';
+  const hi = conf.high != null ? Math.round(conf.high) : '—';
+  el.innerHTML = `<span style="color:${col}">CONF ${conf.label}</span> <span style="display:inline-block;min-width:70px">· range ${lo}–${hi}%</span>`;
 }
 
 function updateLivenessUI(liveness) {
@@ -813,9 +815,9 @@ async function captureAndAnalyse(){
   // up to a minute behind a growing pile of stale analysis requests.
   if(liveState.analysisInFlight){ liveState.skippedFrames=(liveState.skippedFrames||0)+1; return; }
   liveState.analysisInFlight=true;
-  const off=document.createElement('canvas');off.width=video.videoWidth||640;off.height=video.videoHeight||480;off.getContext('2d').drawImage(video,0,0);
+  const off=document.createElement('canvas');off.width=480;off.height=360;off.getContext('2d').drawImage(video,0,0,480,360);
   try{
-    const res=await fetch('/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:off.toDataURL('image/jpeg',0.75),session_id:SESSION_ID,audio:(() => {
+    const res=await fetch('/analyse',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:off.toDataURL('image/jpeg',0.65),session_id:SESSION_ID,audio:(() => {
       const af=extractAudioFeatures(); if(!af) return null;
       af.disfluency_count=drainDisfluency();
       af.response_latency=af.speaking?checkLatency(true):0;
