@@ -2245,7 +2245,11 @@ function toggleClueEvidence(id) {
 }
 
 function drawOverlay(data) {
-  const vw=video.videoWidth||640, vh=video.videoHeight||480;
+  // Landmark coords arrive in the 480×360 space that was sent to the server.
+  // Setting canvas intrinsic size to match that space keeps points aligned with
+  // the face regardless of the webcam's native resolution; CSS handles the
+  // visual stretch to fill the container.
+  const vw=480, vh=360;
   canvas.width=vw; canvas.height=vh;
   ctx.clearRect(0,0,vw,vh);
   const regions = data.regions || {};
